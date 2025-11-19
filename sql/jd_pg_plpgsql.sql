@@ -1,13 +1,13 @@
 -- jd_pg_plpgsql.sql
 --
--- Pure PL/pgSQL helpers and entrypoints for jd-pg, a PostgreSQL port inspired by
+-- Pure PL/pgSQL helpers and entrypoints for jd-sql, a SQL-focused port inspired by
 -- the jd project (https://github.com/josephburnett/jd). This initial version
 -- focuses on top-level JSONB object diffs and patches using built-in PostgreSQL
 -- functionality only (no plv8 integration).
 --
 -- Scope and compatibility notes:
 -- - The jd project defines a rich, human-readable diff format and multiple
---   translation modes. This file provides a pragmatic first step for jd-pg
+--   translation modes. This file provides a pragmatic first step for jd-sql
 --   by implementing a small subset that is useful and testable inside Postgres:
 --     • Top-level object key adds/removes/replaces
 --     • Root scalar replace

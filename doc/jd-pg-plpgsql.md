@@ -1,8 +1,8 @@
-jd-pg PL/pgSQL implementation (initial)
+jd-sql PL/pgSQL implementation (initial)
 
 Overview
 
-This document describes the initial PL/pgSQL-only implementation of jd-pg functions. The goal is to provide a PostgreSQL-native way to generate and apply diffs between JSONB values without requiring plv8.
+This document describes the initial PL/pgSQL-only implementation of jd-sql functions within PostgreSQL. While jd-sql targets SQL implementations beyond just PostgreSQL, this document focuses on the PostgreSQL-native approach to generate and apply diffs between JSONB values without requiring plv8.
 
 Scope for this initial version
 - Top-level object diffs: add, remove, replace operations for keys at the document root.
@@ -10,7 +10,7 @@ Scope for this initial version
 - Patch application for the operation set produced by jd_diff.
 - No array index paths or deep/nested paths yet. These will be added iteratively.
 
-Installation
+Installation (PostgreSQL)
 - Ensure you are connected to your PostgreSQL 15+ database.
 - Load the SQL script:
   \i sql/jd_pg_plpgsql.sql
@@ -36,10 +36,10 @@ Examples
   → {"a":2,"b":3}
 
 Notes on compatibility with jd
-- The canonical jd format is text-based and supports deep paths, array contexts, and options. This initial version focuses on a pragmatic subset suited for early jd-pg usage in SQL. The intention is to expand functionality towards jd feature parity over time.
+- The canonical jd format is text-based and supports deep paths, array contexts, and options. This initial version focuses on a pragmatic subset suited for early jd-sql usage in SQL. The intention is to expand functionality towards jd feature parity over time.
 
 Testing with Equinox
-- We plan to validate jd-pg SQL functions using JerrySievert/equinox. The repository will contain SQL-based tests demonstrating expected behavior for jd_diff and jd_patch.
+- We plan to validate jd-sql SQL functions using JerrySievert/equinox. The repository will contain SQL-based tests demonstrating expected behavior for jd_diff and jd_patch.
 - Until the full test harness is wired into the Makefile flow, you can run the SQL tests manually in a PostgreSQL container/session with psql.
 
 Roadmap

@@ -24,95 +24,69 @@ endif
 
 # --- PostgreSQL dev/test containers ---
 
-# plv8 build container defaults
-# The plv8 Dockerfile is based on the official plv8 build container approach.
-# It builds plv8 from source against the selected Postgres container version.
-# Tested defaults (from upstream): PostgreSQL 15 + plv8 v3.2.4
-PG_CONTAINER_VERSION ?= 15
-
-# Backward compatibility: allow callers to keep using POSTGRES_MAJOR[_PLV8]
-# If provided, map it to PG_CONTAINER_VERSION.
-ifdef POSTGRES_MAJOR_PLV8
-PG_CONTAINER_VERSION := $(POSTGRES_MAJOR_PLV8)
-endif
-ifdef POSTGRES_MAJOR
-PG_CONTAINER_VERSION := $(POSTGRES_MAJOR)
-endif
+# Select the Postgres major version for all builds (vanilla and plv8 variants)
+# Defaults to the latest stable major (update as needed)
+POSTGRES_MAJOR ?= 17
 
 # plv8 source build parameters
 # See upstream README for details: https://github.com/plv8/plv8/blob/r3.2/platforms/Docker/README.md
 PLV8_VERSION ?= 3.2.4
 PLV8_BRANCH ?= r3.2
 
-# Vanilla image defaults to latest stable major.
-POSTGRES_MAJOR_VANILLA ?= 18
+# Container name used for run and shell targets
+PG_DEV_CONTAINER_NAME ?= jd-sql-pg-dev
 
 # Image tags
-PG_IMAGE_NAME_PLV8 ?= jd-pg-dev:$(PG_CONTAINER_VERSION)
-PG_IMAGE_NAME ?= $(PG_IMAGE_NAME_PLV8) # backward-compat alias
-PG_IMAGE_NAME_VANILLA ?= jd-pg-vanilla:$(POSTGRES_MAJOR_VANILLA)
+PG_IMAGE_NAME_PLV8 ?= jd-sql-pg-plv8:$(POSTGRES_MAJOR)
+PG_IMAGE_NAME_VANILLA ?= jd-sql-pg-vanilla:$(POSTGRES_MAJOR)
 
 # Explicit PLV8 targets (preferred names)
 .PHONY : docker-pg-build-plv8
 docker-pg-build-plv8 :
 	docker build \
-		--build-arg PG_CONTAINER_VERSION=$(PG_CONTAINER_VERSION) \
+		--build-arg PG_CONTAINER_VERSION=$(POSTGRES_MAJOR) \
 		--build-arg PLV8_VERSION=$(PLV8_VERSION) \
 		--build-arg PLV8_BRANCH=$(PLV8_BRANCH) \
 		-f docker/postgres-plv8.Dockerfile \
 		-t $(PG_IMAGE_NAME_PLV8) .
 
-.PHONY : docker-pg-run-plv8
-docker-pg-run-plv8 :
+# Unified run/shell/stop targets (use a single dev container name)
+.PHONY : docker-pg-run docker-pg-stop docker-pg-shell
+
+# Image to run by default (vanilla). Override with: PG_RUN_IMAGE=jd-sql-pg-plv8:16 make docker-pg-run
+PG_RUN_IMAGE ?= $(PG_IMAGE_NAME_VANILLA)
+
+docker-pg-run :
 	# Default credentials for local dev only
-	docker run --name jd-pg \
+	docker run --name $(PG_DEV_CONTAINER_NAME) \
 		-e POSTGRES_PASSWORD=postgres \
-		-p 5432:5432 -d $(PG_IMAGE_NAME_PLV8)
+		-p 5432:5432 -d $(PG_RUN_IMAGE)
 
-.PHONY : docker-pg-stop-plv8
-docker-pg-stop-plv8 :
-	- docker rm -f jd-pg
+docker-pg-stop :
+	- docker rm -f $(PG_DEV_CONTAINER_NAME)
 
-.PHONY : docker-pg-shell-plv8
-docker-pg-shell-plv8 :
+docker-pg-shell :
 	# Open a psql shell into the running container
-	docker exec -it jd-pg psql -U postgres
-
-	# Backward-compatibility aliases (legacy target names)
-.PHONY : docker-pg-build docker-pg-run docker-pg-stop docker-pg-shell
-docker-pg-build: docker-pg-build-plv8
-docker-pg-run: docker-pg-run-plv8
-docker-pg-stop: docker-pg-stop-plv8
-docker-pg-shell: docker-pg-shell-plv8
+	docker exec -it $(PG_DEV_CONTAINER_NAME) psql -U postgres
 
 # Vanilla Postgres (no plv8)
 .PHONY : docker-pg-build-vanilla
 docker-pg-build-vanilla :
 	docker build \
-		--build-arg POSTGRES_MAJOR=$(POSTGRES_MAJOR_VANILLA) \
+		--build-arg POSTGRES_MAJOR=$(POSTGRES_MAJOR) \
 		-f docker/postgres.Dockerfile \
 		-t $(PG_IMAGE_NAME_VANILLA) .
 
-.PHONY : docker-pg-run-vanilla
-docker-pg-run-vanilla :
-	# Default credentials for local dev only
-	docker run --name jd-pg-vanilla \
-		-e POSTGRES_PASSWORD=postgres \
-		-p 5433:5432 -d $(PG_IMAGE_NAME_VANILLA)
+# Default simple build target: build vanilla
+.PHONY : docker-pg-build
+docker-pg-build: docker-pg-build-vanilla
 
-.PHONY : docker-pg-stop-vanilla
-docker-pg-stop-vanilla :
-	- docker rm -f jd-pg-vanilla
-
-.PHONY : docker-pg-shell-vanilla
-docker-pg-shell-vanilla :
-	# Open a psql shell into the running container
-	docker exec -it jd-pg-vanilla psql -U postgres
+# (Removed variant-specific run/shell/stop; use unified targets above)
 
 # PLV8 prebuilt option via sibedge/postgres-plv8
 # Defaults to tag "18" (bitnami base); override PREBUILT_PLV8_TAG to use a specific tag like 18.0.0-beta.3
 PREBUILT_PLV8_TAG ?= 18
-PG_IMAGE_NAME_PLV8_PREBUILT ?= jd-pg-dev-prebuilt:$(PREBUILT_PLV8_TAG)
+PG_IMAGE_NAME_PLV8_PREBUILT ?= jd-sql-pg-plv8-prebuilt:$(PREBUILT_PLV8_TAG)
 
 .PHONY : docker-pg-build-plv8-prebuilt
 docker-pg-build-plv8-prebuilt :
@@ -121,18 +95,5 @@ docker-pg-build-plv8-prebuilt :
 		-f docker/postgres-plv8-prebuilt.Dockerfile \
 		-t $(PG_IMAGE_NAME_PLV8_PREBUILT) .
 
-.PHONY : docker-pg-run-plv8-prebuilt
-docker-pg-run-plv8-prebuilt :
-	# Default credentials for local dev only
-	docker run --name jd-pg-prebuilt \
-		-e POSTGRES_PASSWORD=postgres \
-		-p 5442:5432 -d $(PG_IMAGE_NAME_PLV8_PREBUILT)
-
-.PHONY : docker-pg-stop-plv8-prebuilt
-docker-pg-stop-plv8-prebuilt :
-	- docker rm -f jd-pg-prebuilt
-
-.PHONY : docker-pg-shell-plv8-prebuilt
-docker-pg-shell-plv8-prebuilt :
-	# Open a psql shell into the running container
-	docker exec -it jd-pg-prebuilt psql -U postgres
+# To run the prebuilt image, use:
+#   PG_RUN_IMAGE=$(PG_IMAGE_NAME_PLV8_PREBUILT) make docker-pg-run

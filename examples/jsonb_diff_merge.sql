@@ -3,7 +3,7 @@
 -- Purpose: Demonstrate diffing and merging JSONB data in three ways:
 --  1) Using only built-in PostgreSQL JSONB operators/functions
 --  2) Using only built-in capabilities of plv8 (JavaScript in PostgreSQL)
---  3) Placeholder notes outlining advantages of using jd-pg
+--  3) Placeholder notes outlining advantages of using jd-sql
 --
 -- This file is designed to be copy/paste runnable in psql. You can run
 -- individual sections independently. Nothing is created permanently
@@ -71,7 +71,7 @@ SELECT
 --   removed from B, so it will appear under removed_keys.
 -- - A nested key was also removed: meta.active (present in A, missing in B).
 --   This basic top-level diff does NOT detect nested removals; detecting them
---   requires manual traversal or alternative tooling. See the plv8 and jd-pg
+--   requires manual traversal or alternative tooling. See the plv8 and jd-sql
 --   sections below for approaches to deep diffs.
 
 -- Show the specific value-level changes for changed keys
@@ -211,7 +211,7 @@ cross join lateral plv8_jsonb_deep_diff(a,b) as diff;
 
 
 -- ================================================================
--- 3) Why jd-pg?
+-- 3) Why jd-sql?
 -- ================================================================
 -- Placeholder notes (see README for full details):
 -- - Human-readable, stable structural diffs designed for code review.
@@ -222,5 +222,5 @@ cross join lateral plv8_jsonb_deep_diff(a,b) as diff;
 -- - Designed to avoid accidental data clobber when merging complex JSON.
 
 -- In short, built-ins and plv8 can be used to craft custom behaviors,
--- but it requires non-trivial SQL for each use case. jd-pg provides a
+-- but it requires non-trivial SQL for each use case. jd-sql provides a
 -- single configurable function to generate diffs and patches in jd format.

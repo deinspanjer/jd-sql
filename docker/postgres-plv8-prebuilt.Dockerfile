@@ -8,7 +8,7 @@
 # Examples:
 #   docker build -f docker/postgres-plv8-prebuilt.Dockerfile \
 #     --build-arg PREBUILT_PLV8_TAG=18.0.0-beta.3 \
-#     -t jd-pg-dev-prebuilt:18 .
+#     -t jd-sql-pg-dev-prebuilt:18 .
 
 ARG PREBUILT_PLV8_TAG=18
 FROM docker.io/sibedge/postgres-plv8:${PREBUILT_PLV8_TAG}
