@@ -1,0 +1,309 @@
+# SQL JSON diff and patch
+
+`jd-sql` is a set of SQL-centric implementations of the JSON diff and patch spec provided by [jd](https://github.com/josephburnett/jd)
+
+It supports a native `jd` format (similar to unified format) as well as JSON Merge Patch ([RFC 7386](https://datatracker.ietf.org/doc/html/rfc7386)) and a subset of JSON Patch ([RFC 6902](https://datatracker.ietf.org/doc/html/rfc6902)).
+
+The currently provided implementations are:
+- postgres-vanilla: PostgreSQL-native functions implemented in `PL/pgSQL` supporting PostgreSQL v15 and above (possibly lower but not tested)
+- postgres-plv8: PostgreSQL functions implemented in `plv8` version 3.2.4 (tested with PostgreSQL v15,16,17)
+
+Planned implementations in preference order:
+- DuckDB
+- Databricks
+
+Unplanned implementations that should be possible if there is demand or collaboration:
+- SQLServer
+- MySQL
+- SQLite
+
+Implementations for commercial databases will only be considered if assets can be safely contributed and maintained.
+
+## Examples
+
+See the README and examples in the [josephburnett/jd](https://github.com/josephburnett/jd) repo for general examples.
+See the [examples/jsonb_diff_merge.sql](examples/jsonb_diff_merge.sql) file for examples of how to use the `jd-sql` functions.
+
+Quick example:
+
+```
+SELECT jd_diff('{"a":1}'::jsonb, '{"a":2,"b":3}'::jsonb);
+-- => [{"op":"replace","path":["a"],"value":2},{"op":"add","path":["b"],"value":3}]
+
+SELECT jd_patch('{"a":1}'::jsonb, '[{"op":"replace","path":["a"],"value":2},{"op":"add","path":["b"],"value":3}]');
+-- => {"a":2,"b":3}
+```
+
+## Features
+
+1. Human-friendly format, similar to Unified Diff.
+2. Produces a minimal diff between array elements using LCS algorithm.
+3. Adds context before and after when modifying an array to prevent bad patches.
+4. Create and apply structural patches in jd, patch (RFC 6902) and merge (RFC 7386) patch formats.
+5. Translates between patch formats.
+
+## Installation
+
+TODO: add installation instructions for each implementation
+
+## Development and testing
+
+We provide a Docker-based development environment for each supported implementation.
+Check the doc folder for your implementation for details.
+
+
+## Testing with Equinox
+
+- We include initial SQL tests in spec/test/sql for use with JerrySievert/equinox.
+- These tests can also be run manually for quick verification.
+- To run the tests, run `make test` in the root directory.
+
+# Usage documentation copied from `jd` project
+The following documentation is almost identical to the original jd project.
+Only examples and references to the library or CLI have been changed to reflect the SQL implementation.
+
+## Option Details
+
+These options are identical to the options provided by the main `jd` project.
+They are copied here for convenience.
+
+`setkeys` This option determines what keys are used to decide if two
+objects 'match'. Then the matched objects are compared, which will
+return a diff if there are differences in the objects themselves,
+their keys and/or values. You shouldn't expect this option to mask or
+ignore non-specified keys, it is not intended as a way to 'ignore'
+some differences between objects.
+
+### PathOptions: Targeted Comparison Options
+
+PathOptions allow you to apply different comparison semantics to specific paths in your JSON/YAML data. This enables precise control over how different parts of your data are compared.
+
+**PathOption Syntax:**
+```jsonc
+{"@": ["path", "to", "target"], "^": [options]}
+```
+
+- `@` (At): JSON path array specifying where to apply the option
+- `^` (Then): Array of options to apply at that path
+
+**Supported Options:**
+- `"SET"`: Treat array as a set (ignore order and duplicates)
+- `"MULTISET"`: Treat array as a multiset (ignore order, count duplicates)  
+- `{"precision": N}`: Numbers within N are considered equal
+- `{"setkeys": ["key1", "key2"]}`: Match objects by specified keys
+- `"DIFF_ON"`: Enable diffing at this path (default behavior)
+- `"DIFF_OFF"`: Disable diffing at this path, ignore all changes
+
+**Examples:**
+
+Treat specific array as a set while others remain as lists:
+```sql
+select jd_diff(left, right, opts :='[{"@":["tags"],"^":["SET"]}]')
+```
+
+Apply precision to specific temperature field:
+```sql
+select jd_diff(left, right, opts :='[{"@":["sensor","temperature"],"^":[{"precision":0.1}]}]')
+```
+
+Multiple PathOptions - SET on one path, precision on another:
+```sql
+select jd_diff(left, right, opts :='[{"@":["items"],"^":["SET"]}, {"@":["price"],"^":[{"precision":0.01}]}]')
+```
+
+Target specific array index:
+```sql
+select jd_diff(left, right, opts :='[{"@":["measurements", 0],"^":[{"precision":0.05}]}]')
+```
+
+Apply to root level:
+```sql
+select jd_diff(left, right, opts :='[{"@":[],"^":["SET"]}]')
+```
+
+Ignore specific fields (deny-list approach):
+```sql
+select jd_diff(left, right, opts :='[{"@":["timestamp"],"^":["DIFF_OFF"]}, {"@":["metadata","generated"],"^":["DIFF_OFF"]}]')
+```
+
+Allow-list approach - ignore everything except specific fields:
+```sql
+select jd_diff(left, right, opts :='[{"@":[],"^":["DIFF_OFF"]}, {"@":["userdata"],"^":["DIFF_ON"]}]')
+```
+
+Nested override - ignore parent but include specific child:
+```sql
+select jd_diff(left, right, opts :='[{"@":["config"],"^":["DIFF_OFF"]}, {"@":["config","user_settings"],"^":["DIFF_ON"]}]')
+```
+
+
+## Diff Language (v2)
+
+The jd v2 diff format is a human-readable structural diff format with context and metadata support.
+
+### Format Overview
+
+A diff consists of:
+- **Options header** (optional): Shows the options used to create the diff
+- **Metadata lines** (optional): Start with `^` and specify hunk-level metadata  
+- **Diff hunks**: Start with `@` and specify the path, followed by changes and context
+
+### Options Header
+
+When options are provided to `jd`, they are displayed at the beginning of the diff to show how it was produced. Each option appears on its own line starting with `^ `:
+
+```diff
+^ "SET"
+^ {"precision":0.001}
+@ ["items",{}]
+- "old-item"
++ "new-item"
+```
+
+This feature helps understand:
+- Whether arrays were treated as sets (`"SET"`) or multisets (`"MULTISET"`) 
+- What precision was used for number comparisons (`{"precision":N}`)
+- Which keys identify set objects (`{"setkeys":["key1","key2"]}`)
+- Path-specific options (`{"@":["path"],"^":["OPTION"]}`)
+- Whether merge semantics were applied (`"MERGE"`)
+- If color output was requested (`"COLOR"`)
+
+The options header is informational and helps with debugging diff behavior. Note that diffs with options headers can still be parsed and applied as patches.
+
+### EBNF Grammar
+
+```EBNF
+Diff ::= OptionsHeader* (MetadataLine | DiffHunk)*
+
+OptionsHeader ::= '^' SP JsonValue NEWLINE
+
+MetadataLine ::= '^' SP JsonObject NEWLINE
+
+DiffHunk ::= '@' SP JsonArray NEWLINE
+             ContextLine*
+             (RemoveLine | AddLine)*
+             ContextLine*
+
+ContextLine ::= SP SP JsonValue NEWLINE
+
+RemoveLine ::= '-' SP JsonValue NEWLINE
+
+AddLine ::= '+' SP JsonValue NEWLINE
+
+JsonArray ::= '[' (PathElement (',' PathElement)*)? ']'
+
+PathElement ::= JsonString        // Object key: "foo"
+              | JsonNumber        // Array index: 0 
+              | EmptyObject       // Set marker: {}
+              | EmptyArray        // List marker: [] 
+              | ObjectWithKeys    // Set keys: {"id":"value"}
+              | ArrayWithObject   // Multiset: [{}] or [{"id":"value"}]
+```
+
+### Path Elements Reference
+
+| Element | Description | Example Path |
+|---------|-------------|--------------|
+| `"key"` | Object field access | `["user","name"]` |
+| `0`, `1`, etc. | Array index access | `["items",0]` |
+| `{}` | Treat array as set (ignore order/duplicates) | `["tags",{}]` |
+| `[]` | Explicit list marker | `["values",[]]` |
+| `{"id":"val"}` | Match objects by specific key | `["users",{"id":"123"}]` |
+| `[{}]` | Treat as multiset (ignore order, count duplicates) | `["counts",[{}]]` |
+| `[{"key":"val"}]` | Match multiset objects by key | `["items",[{"id":"456"}]]` |
+
+### Line Types
+
+- **`@ [path]`**: Diff hunk header specifying the location
+- **`^ {metadata}`**: Metadata for the following hunks (inherits downward)  
+- **`  value`**: Context lines (spaces) - elements that provide context
+- **`- value`**: Remove lines - values being removed
+- **`+ value`**: Add lines - values being added
+
+### Core Examples
+
+#### Simple Object Change
+```diff
+@ ["name"]
+- "Alice"
++ "Bob"
+```
+
+#### Array Element with Context
+```diff
+@ ["items",1]
+  "apple"
++ "banana" 
+  "cherry"
+```
+
+#### Set Operations (Ignore Order)
+```diff
+@ ["tags",{}]
+- "urgent"
++ "completed"
++ "reviewed"
+```
+
+#### Object Identification by Key
+```diff
+@ ["users",{"id":"123"},"status"]
+- "pending"
++ "active"
+```
+
+#### Multiset Operations
+```diff
+@ ["scores",[{}]]
+- 85
+- 92
++ 88
++ 95
++ 95
+```
+
+### Advanced Examples
+
+#### Merge Patch Metadata
+```diff
+^ {"Merge":true}
+@ ["config"]
+- {"timeout":30,"retries":3}
++ {"timeout":60,"retries":5,"debug":true}
+```
+
+#### Complex List Context
+```diff
+@ ["matrix",1,2]
+  [[1,2,3],[4,5,6]]
+- 6
++ 9
+  [7,8,9]
+]
+```
+
+#### Nested Set with PathOptions
+```diff
+@ ["department","employees",{"employeeId":"E123"},"projects",{}]
+- "ProjectA"
++ "ProjectB" 
++ "ProjectC"
+```
+
+#### Multiple Hunks with Inheritance
+```diff
+^ {"Merge":true}
+@ ["user","preferences"] 
++ {"theme":"dark","notifications":true}
+@ ["user","lastLogin"]
++ "2023-12-01T10:30:00Z"
+```
+
+### Integration with PathOptions
+
+The path syntax directly corresponds to PathOption targeting:
+- Diff path `["users",{}]` ↔ PathOption `{"@":["users"],"^":["SET"]}`
+- Diff path `["items",{"id":"123"}]` ↔ PathOption with SetKeys targeting
+- Diff path `["scores",[{}]]` ↔ PathOption `{"@":["scores"],"^":["MULTISET"]}`
+
+This allows fine-grained control over how different parts of your data structures are compared and diffed.
