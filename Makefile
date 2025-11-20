@@ -97,3 +97,44 @@ docker-pg-build-plv8-prebuilt :
 
 # To run the prebuilt image, use:
 #   PG_RUN_IMAGE=$(PG_IMAGE_NAME_PLV8_PREBUILT) make docker-pg-run
+
+# --- Upstream jd submodule helpers ---
+
+.PHONY: jd-submodule-init jd-submodule-update jd-spec-test jd-spec-pull
+
+# Initialize and update the josephburnett/jd git submodule.
+# Usage (first time after clone): make jd-submodule-init
+jd-submodule-init:
+	@git submodule update --init --recursive
+	@echo "Submodule status:"
+	@git submodule status
+
+# Pull latest upstream changes into the submodule's checked-out branch.
+# This does not auto-commit in the parent repo; review and commit the
+# submodule pointer change as desired.
+jd-submodule-update:
+	@echo "Updating external/jd from upstream..."
+	@cd external/jd && git fetch --all --tags && git checkout $$(git rev-parse --abbrev-ref HEAD) && git pull --ff-only || true
+	@git submodule status
+
+# Convenience: checkout a specific ref (tag/branch/commit) inside submodule.
+# Example: make jd-spec-pull REF=v2.2.0
+REF ?=
+jd-spec-pull:
+	@if [ -z "$(REF)" ]; then \
+	  echo "Set REF to a tag/branch/commit, e.g.: make jd-spec-pull REF=v2.2.0"; \
+	  exit 2; \
+	fi
+	@cd external/jd && git fetch --all --tags && git checkout $(REF)
+	@git submodule status
+
+# Placeholder for running upstream jd spec tests via a wrapper that will be
+# added to jd-sql. For now, just list available upstream spec cases and print
+# guidance.
+jd-spec-test:
+	@echo "[jd-sql] Upstream jd spec test wrapper is not yet available."
+	@echo "Listing upstream spec cases found in external/jd/spec/test/cases:"
+	@ls -1 external/jd/spec/test/cases 2>/dev/null || echo "(No cases directory found; did you run 'make jd-submodule-init'?)"
+	@echo
+	@echo "Once the wrapper is added, this target will execute it against jd-sql."
+	@echo "In the meantime you can explore specs under external/jd/spec/test."

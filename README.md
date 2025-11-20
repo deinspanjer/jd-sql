@@ -22,7 +22,7 @@ Implementations for commercial databases will only be considered if assets can b
 ## Examples
 
 See the README and examples in the [josephburnett/jd](https://github.com/josephburnett/jd) repo for general examples.
-See the [examples/jsonb_diff_merge.sql](examples/jsonb_diff_merge.sql) file for examples of how to use the `jd-sql` functions.
+See the [examples/jsonb_diff_merge.sql](examples/postgres/jsonb_diff_merge.sql) file for examples of how to use the `jd-sql` functions.
 
 Quick example:
 
@@ -50,6 +50,18 @@ TODO: add installation instructions for each implementation
 
 We provide a Docker-based development environment for each supported implementation.
 Check the doc folder for your implementation for details.
+
+### Upstream jd submodule and spec tests
+
+This repository includes the upstream josephburnett/jd project as a Git submodule under external/jd. We use it primarily to view upstream code and run/port spec tests.
+
+- Location: external/jd (spec cases in external/jd/spec/test)
+- First-time setup: make jd-submodule-init
+- Update to latest upstream on the current submodule branch: make jd-submodule-update
+- Checkout a specific tag/branch/commit: make jd-spec-pull REF=v2.2.0
+- List available upstream spec cases (temporary placeholder): make jd-spec-test
+
+A test wrapper to execute these upstream specs against jd-sql will be added shortly. See doc/jd-upstream.md for more details.
 
 
 ## Testing with Equinox
