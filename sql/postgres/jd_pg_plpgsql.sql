@@ -50,53 +50,220 @@ $$;
 COMMENT ON FUNCTION _jd_path_text(jsonb) IS 'Internal helper: converts a JSON array path (of text keys) into a dotted text path for messages.';
 
 
-CREATE OR REPLACE FUNCTION jd_diff(a jsonb, b jsonb)
-RETURNS jsonb
+-- Render helpers
+CREATE OR REPLACE FUNCTION _jd_render_value(j jsonb)
+RETURNS text
 LANGUAGE plpgsql
-STABLE
+IMMUTABLE
 AS $$
 DECLARE
-  ta text := jsonb_typeof(a);
-  tb text := jsonb_typeof(b);
-  ops jsonb := '[]'::jsonb;
+  t text := CASE WHEN j IS NULL THEN 'void' ELSE jsonb_typeof(j) END;
+  out text := '';
+  i int;
+  n int;
   k text;
+  v jsonb;
+  first boolean;
 BEGIN
-  -- If types differ or either is scalar while not equal: whole-value replace
-  IF ta IS DISTINCT FROM tb OR _jd_is_scalar(a) OR _jd_is_scalar(b) THEN
-    IF a IS DISTINCT FROM b THEN
-      RETURN jsonb_build_array(jsonb_build_object(
-        'op','replace', 'path','[]'::jsonb, 'value', b
-      ));
-    ELSE
-      RETURN '[]'::jsonb;
-    END IF;
+  -- SQL NULL indicates no value (should not normally occur for real JSON values)
+  IF j IS NULL THEN
+    RETURN '';
   END IF;
 
-  -- For objects: compute adds, removes, replaces for top-level keys
-  IF ta = 'object' THEN
-    -- Removed keys (present in a, absent in b)
+  IF t = 'object' THEN
+    out := '{';
+    first := true;
+    -- Deterministic key order for stable rendering
+    FOR k, v IN
+      SELECT key, value FROM jsonb_each(j) ORDER BY key
+    LOOP
+      IF NOT first THEN
+        out := out || ',';
+      END IF;
+      -- Use to_jsonb(k)::text to ensure proper JSON string quoting for keys
+      out := out || to_jsonb(k)::text || ':' || _jd_render_value(v);
+      first := false;
+    END LOOP;
+    out := out || '}';
+    RETURN out;
+  ELSIF t = 'array' THEN
+    out := '[';
+    n := COALESCE(jsonb_array_length(j), 0);
+    i := 0;
+    WHILE i < n LOOP
+      IF i > 0 THEN
+        out := out || ',';
+      END IF;
+      out := out || _jd_render_value(j->i);
+      i := i + 1;
+    END LOOP;
+    out := out || ']';
+    RETURN out;
+  ELSE
+    -- Scalars: Postgres jsonb::text is already compact and correct for strings/numbers/booleans/null
+    RETURN j::text;
+  END IF;
+END;
+$$;
+
+COMMENT ON FUNCTION _jd_render_value(jsonb) IS 'Internal helper: compact JSON rendering for values (jsonb::text). Returns empty string for SQL NULL (void).';
+
+
+CREATE OR REPLACE FUNCTION _jd_render_path(path jsonb)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+  out text := '[';
+  i int := 0;
+  n int := COALESCE(jsonb_array_length(path), 0);
+  v jsonb;
+BEGIN
+  WHILE i < n LOOP
+    v := path->i;
+    IF i > 0 THEN
+      out := out || ',';
+    END IF;
+    -- v::text already renders valid JSON for strings and numbers
+    out := out || v::text;
+    i := i + 1;
+  END LOOP;
+  out := out || ']';
+  RETURN out;
+END;
+$$;
+
+COMMENT ON FUNCTION _jd_render_path(jsonb) IS 'Internal helper: render a JSONB path array as jd path string (e.g., ["a",1]).';
+
+
+CREATE OR REPLACE FUNCTION _jd_path_append(path jsonb, elem jsonb)
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT COALESCE($1,'[]'::jsonb) || jsonb_build_array($2);
+$$;
+
+COMMENT ON FUNCTION _jd_path_append(jsonb, jsonb) IS 'Internal helper: append an element to a JSONB array path.';
+
+
+CREATE OR REPLACE FUNCTION _jd_diff_array(a jsonb, b jsonb, path jsonb)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+  la int := COALESCE(jsonb_array_length(a), 0);
+  lb int := COALESCE(jsonb_array_length(b), 0);
+  p int := 0; -- common prefix length
+  s int := 0; -- common suffix length
+  i int;
+  out text := '';
+  idx_path jsonb;
+BEGIN
+  -- Find common prefix
+  WHILE p < la AND p < lb AND a->p = b->p LOOP
+    p := p + 1;
+  END LOOP;
+
+  -- Find common suffix (ensure no overlap with prefix)
+  WHILE (s < la - p) AND (s < lb - p) AND (a->(la - 1 - s)) = (b->(lb - 1 - s)) LOOP
+    s := s + 1;
+  END LOOP;
+
+  IF la = lb AND p = la THEN
+    RETURN '';
+  END IF;
+
+  idx_path := _jd_path_append(path, to_jsonb(p));
+  out := out || '@ ' || _jd_render_path(idx_path) || E'\n';
+
+  IF p = 0 THEN
+    out := out || '[' || E'\n';
+  ELSE
+    out := out || '  ' || _jd_render_value(a->(p-1)) || E'\n';
+  END IF;
+
+  -- deletions (from a[p .. la-s-1])
+  i := p;
+  WHILE i < la - s LOOP
+    out := out || '- ' || _jd_render_value(a->i) || E'\n';
+    i := i + 1;
+  END LOOP;
+
+  -- additions (from b[p .. lb-s-1])
+  i := p;
+  WHILE i < lb - s LOOP
+    out := out || '+ ' || _jd_render_value(b->i) || E'\n';
+    i := i + 1;
+  END LOOP;
+
+  IF s = 0 THEN
+    out := out || ']' || E'\n';
+  ELSE
+    out := out || '  ' || _jd_render_value(a->(la - s)) || E'\n';
+  END IF;
+
+  RETURN out;
+END;
+$$;
+
+COMMENT ON FUNCTION _jd_diff_array(jsonb, jsonb, jsonb) IS 'Internal helper: compute jd-style array diff for core cases with simple prefix/suffix context.';
+
+
+CREATE OR REPLACE FUNCTION _jd_diff_text(a jsonb, b jsonb, path jsonb)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+  out text := '';
+  ta text := CASE WHEN a IS NULL THEN 'void' ELSE jsonb_typeof(a) END;
+  tb text := CASE WHEN b IS NULL THEN 'void' ELSE jsonb_typeof(b) END;
+  k text;
+  v_a jsonb;
+  v_b jsonb;
+BEGIN
+  -- Handle equality including NULLs/void
+  IF a IS NOT DISTINCT FROM b THEN
+    RETURN '';
+  END IF;
+
+  -- Void transitions produce single +/- line
+  IF ta = 'void' AND tb <> 'void' THEN
+    out := out || '@ ' || _jd_render_path(path) || E'\n'
+               || '+ ' || _jd_render_value(b) || E'\n';
+    RETURN out;
+  ELSIF tb = 'void' AND ta <> 'void' THEN
+    out := out || '@ ' || _jd_render_path(path) || E'\n'
+               || '- ' || _jd_render_value(a) || E'\n';
+    RETURN out;
+  END IF;
+
+  -- Objects: recurse per key
+  IF ta = 'object' AND tb = 'object' THEN
+    -- removals
     FOR k IN
       SELECT key FROM jsonb_object_keys(a) AS key
       EXCEPT
       SELECT key FROM jsonb_object_keys(b) AS key
     LOOP
-      ops := ops || jsonb_build_array(jsonb_build_object(
-        'op','remove', 'path', jsonb_build_array(k)
-      ));
+      out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
+                  || '- ' || _jd_render_value(a->k) || E'\n';
     END LOOP;
 
-    -- Added keys (present in b, absent in a)
+    -- additions
     FOR k IN
       SELECT key FROM jsonb_object_keys(b) AS key
       EXCEPT
       SELECT key FROM jsonb_object_keys(a) AS key
     LOOP
-      ops := ops || jsonb_build_array(jsonb_build_object(
-        'op','add', 'path', jsonb_build_array(k), 'value', b->k
-      ));
+      out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
+                  || '+ ' || _jd_render_value(b->k) || E'\n';
     END LOOP;
 
-    -- Changed keys (present in both, values differ)
+    -- changes
     FOR k IN
       SELECT key
       FROM (
@@ -104,35 +271,40 @@ BEGIN
         INTERSECT
         SELECT key FROM jsonb_object_keys(b) AS key
       ) s
-      WHERE a->key IS DISTINCT FROM b->key
     LOOP
-      ops := ops || jsonb_build_array(jsonb_build_object(
-        'op','replace', 'path', jsonb_build_array(k), 'value', b->k
-      ));
+      v_a := a->k; v_b := b->k;
+      IF v_a IS DISTINCT FROM v_b THEN
+        out := out || _jd_diff_text(v_a, v_b, _jd_path_append(path, to_jsonb(k)));
+      END IF;
     END LOOP;
 
-    RETURN ops;
-  ELSIF ta = 'array' THEN
-    -- Arrays: for now, only detect whole-value replace when unequal
-    IF a IS DISTINCT FROM b THEN
-      RETURN jsonb_build_array(jsonb_build_object(
-        'op','replace', 'path','[]'::jsonb, 'value', b
-      ));
-    END IF;
-    RETURN '[]'::jsonb;
+    RETURN out;
+  ELSIF ta = 'array' AND tb = 'array' THEN
+    RETURN _jd_diff_array(a, b, path);
   ELSE
-    -- Fallback: if equal, no ops; otherwise replace
-    IF a IS DISTINCT FROM b THEN
-      RETURN jsonb_build_array(jsonb_build_object(
-        'op','replace', 'path','[]'::jsonb, 'value', b
-      ));
-    END IF;
-    RETURN '[]'::jsonb;
+    -- Scalar changes or type changes (non-void): emit replace as -/+ pair
+    out := out || '@ ' || _jd_render_path(path) || E'\n'
+               || '- ' || _jd_render_value(a) || E'\n'
+               || '+ ' || _jd_render_value(b) || E'\n';
+    RETURN out;
   END IF;
 END;
 $$;
 
-COMMENT ON FUNCTION jd_diff(jsonb, jsonb) IS 'Compute a simplified jd-like diff between JSONB values. Supports top-level object adds/removes/replaces and whole-value replace for arrays/scalars.';
+COMMENT ON FUNCTION _jd_diff_text(jsonb, jsonb, jsonb) IS 'Internal helper: recursive jd-style textual diff limited to core spec cases.';
+
+
+CREATE OR REPLACE FUNCTION jd_diff(a jsonb, b jsonb)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+  RETURN _jd_diff_text(a, b, '[]'::jsonb);
+END;
+$$;
+
+COMMENT ON FUNCTION jd_diff(jsonb, jsonb) IS 'Compute jd spec-like textual diff for core cases. Returns empty string when equal.';
 
 
 CREATE OR REPLACE FUNCTION _jd_apply_op(doc jsonb, op jsonb)
