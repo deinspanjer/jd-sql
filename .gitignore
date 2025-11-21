@@ -1,0 +1,3 @@
+# Ignore build artifacts from the Rust spec test harness runner
+# The Cargo build outputs are placed under this directory and should not be versioned
+tools/jd-sql-spec-runner/target/

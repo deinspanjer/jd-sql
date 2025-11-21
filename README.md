@@ -59,9 +59,59 @@ This repository includes the upstream josephburnett/jd project as a Git submodul
 - First-time setup: make jd-submodule-init
 - Update to latest upstream on the current submodule branch: make jd-submodule-update
 - Checkout a specific tag/branch/commit: make jd-spec-pull REF=v2.2.0
-- List available upstream spec cases (temporary placeholder): make jd-spec-test
+- Run upstream jd spec tests against jd-sql: make jd-spec-test
 
-A test wrapper to execute these upstream specs against jd-sql will be added shortly. See doc/jd-upstream.md for more details.
+#### jd-sql Rust test harness
+
+We provide a small Rust wrapper that lets the upstream spec runner call into a configured jd-sql SQL implementation.
+
+- Location: tools/jd-sql-spec-runner
+- Config file: tools/jd-sql-spec-runner/jd-sql-spec.yaml (create by copying the provided example)
+
+Config example (YAML):
+
+```
+engine: postgres
+dsn: postgres://postgres:postgres@localhost:5432/postgres
+sql: |
+  SELECT jd_diff($1::jsonb, $2::jsonb)
+```
+
+How it works:
+- The upstream Go test harness creates two temporary files containing the A and B JSON documents.
+- It invokes the Rust wrapper (the "binary under test"), passing through arguments and the two file paths.
+- The Rust wrapper reads the YAML config, connects to the configured database, executes the configured SQL with the two JSON inputs bound as parameters, and prints the result to stdout.
+- The Go harness compares stdout with the expected diff for each case.
+
+To run the test suite against jd-sql (PostgreSQL):
+
+1) Build and run a dev Postgres with jd-sql installed
+
+```
+make docker-pg-build
+make docker-pg-run
+# Once running, in another terminal install the SQL functions:
+psql -h localhost -U postgres -f sql/postgres/jd_pg_plpgsql.sql
+```
+
+2) Create the runner config
+
+```
+cp tools/jd-sql-spec-runner/jd-sql-spec.example.yaml tools/jd-sql-spec-runner/jd-sql-spec.yaml
+# Adjust DSN if needed
+```
+
+3) Execute the upstream spec tests via the wrapper
+
+```
+make jd-spec-test
+```
+
+Notes:
+- The wrapper currently supports Postgres only.
+- The provided SQL example returns JSONB (from jd_diff); the wrapper will print compact JSON if the first column is JSON/JSONB, or print text verbatim if it’s TEXT. Mapping to the exact jd structural diff text format will come as jd-sql evolves.
+ - Config discovery: You can omit -c/--config. The runner will look for jd-sql-spec.yaml in (1) the current working directory, then (2) the same directory as the runner executable. Use -c to override explicitly.
+ - Exit codes: The spec runner expects exit code 1 when a diff is produced and 0 when no diff is produced. The jd-sql runner follows this: it exits 1 if the SQL result indicates a non-empty diff (non-empty TEXT or non-empty JSON/JSONB), exits 0 if the result is empty (empty string, null, [] or {}). Any runner error (invalid inputs, DB/connect/SQL failures, unsupported result type) exits with code 2.
 
 
 ## Testing with Equinox

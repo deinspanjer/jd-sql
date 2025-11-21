@@ -100,7 +100,7 @@ docker-pg-build-plv8-prebuilt :
 
 # --- Upstream jd submodule helpers ---
 
-.PHONY: jd-submodule-init jd-submodule-update jd-spec-test jd-spec-pull
+.PHONY: jd-submodule-init jd-submodule-update jd-spec-test jd-spec-pull jd-spec-build-runner
 
 # Initialize and update the josephburnett/jd git submodule.
 # Usage (first time after clone): make jd-submodule-init
@@ -132,9 +132,46 @@ jd-spec-pull:
 # added to jd-sql. For now, just list available upstream spec cases and print
 # guidance.
 jd-spec-test:
-	@echo "[jd-sql] Upstream jd spec test wrapper is not yet available."
-	@echo "Listing upstream spec cases found in external/jd/spec/test/cases:"
-	@ls -1 external/jd/spec/test/cases 2>/dev/null || echo "(No cases directory found; did you run 'make jd-submodule-init'?)"
+	@echo "[jd-sql] Building Rust spec runner..."
+	@cd tools/jd-sql-spec-runner && cargo build --release
+	@echo "[jd-sql] Ensuring upstream jd spec runner is built..."
+	@cd external/jd/spec/test && go build -o test-runner .
 	@echo
-	@echo "Once the wrapper is added, this target will execute it against jd-sql."
-	@echo "In the meantime you can explore specs under external/jd/spec/test."
+	@echo "[jd-sql] Running upstream jd spec against jd-sql via runner"
+	@echo "Note: Ensure the jd-sql Postgres dev container is running and functions installed:"
+	@echo "  make docker-pg-build && make docker-pg-run"
+	@echo "  psql -h localhost -U postgres -f sql/postgres/jd_pg_plpgsql.sql"
+	@echo
+	@echo "If needed, copy and edit tools/jd-sql-spec-runner/jd-sql-spec.example.yaml to tools/jd-sql-spec-runner/jd-sql-spec.yaml"
+	@echo
+	@cd external/jd/spec/test && ./test-runner ../../../../tools/jd-sql-spec-runner/target/release/jd-sql-spec-runner
+	@echo
+	@echo "Done."
+
+jd-spec-build-runner:
+	@cd tools/jd-sql-spec-runner && cargo build --release
+
+
+# --- Local Postgres install and smoke tests ---
+.PHONY: pg-install pg-smoke
+
+# Connection defaults match docker-pg-run (localhost:5432 postgres/postgres)
+PGHOST ?= localhost
+PGPORT ?= 5432
+PGUSER ?= postgres
+PGPASSWORD ?= postgres
+PGDATABASE ?= postgres
+
+pg-install:
+	@echo "[jd-sql] Installing PL/pgSQL functions into $(PGHOST):$(PGPORT)/$(PGDATABASE) as $(PGUSER)"
+	@PGPASSWORD=$(PGPASSWORD) psql -v ON_ERROR_STOP=1 -h $(PGHOST) -p $(PGPORT) -U $(PGUSER) -d $(PGDATABASE) \
+		-f sql/postgres/jd_pg_plpgsql.sql
+
+pg-smoke:
+	@echo "[jd-sql] Running smoke tests against jd_diff"
+	@PGPASSWORD=$(PGPASSWORD) psql -X -v ON_ERROR_STOP=1 -h $(PGHOST) -p $(PGPORT) -U $(PGUSER) -d $(PGDATABASE) -c \
+		"SELECT jd_diff('{\"a\":1}'::jsonb, '{\"a\":2}'::jsonb) AS simple_object_value_change;"
+	@PGPASSWORD=$(PGPASSWORD) psql -X -v ON_ERROR_STOP=1 -h $(PGHOST) -p $(PGPORT) -U $(PGUSER) -d $(PGDATABASE) -c \
+		"SELECT jd_diff('{\"foo\":[\"bar\",\"baz\"]}'::jsonb, '{\"foo\":[\"bar\",\"boom\"]}'::jsonb) AS array_element_change;"
+	@PGPASSWORD=$(PGPASSWORD) psql -X -v ON_ERROR_STOP=1 -h $(PGHOST) -p $(PGPORT) -U $(PGUSER) -d $(PGDATABASE) -c \
+		"SELECT jd_diff('null'::jsonb, '{\"a\":1}'::jsonb) AS null_to_object;"

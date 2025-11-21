@@ -1,0 +1,18 @@
+# Example configuration for jd-sql-spec-runner
+# Copy this to jd-sql-spec.yaml and adjust as needed.
+
+# Only postgres is supported at the moment
+engine: postgres
+
+# Default dev DSN matches the Makefile docker-pg-run container
+# user: postgres, password: postgres, db: postgres
+dsn: postgres://postgres:postgres@localhost:5432/postgres
+
+# SQL to execute. The runner binds:
+#   $1 = first JSON document (A)
+#   $2 = second JSON document (B)
+# The query should return either TEXT (preferred jd structural diff) or JSON(B).
+# For the current jd_pg_plpgsql.sql functions, jd_diff returns JSONB ops. You can
+# convert to text if you have a renderer; otherwise the runner will print compact JSON.
+sql: |
+  SELECT jd_diff($1::jsonb, $2::jsonb)
