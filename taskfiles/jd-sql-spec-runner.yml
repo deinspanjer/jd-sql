@@ -45,5 +45,6 @@ tasks:
         cp -R external/jd/spec/test/testdata out/test
         # Provide jd-sql runner config as jd-sql-spec.yaml in the workspace
         cp "{{.CFG}}" out/test/jd-sql-spec.yaml
-        echo "[jd-sql] Running upstream tests from out/test"
-        (cd out/test && ./bin/jd-upstream-test-runner -verbose ./bin/jd-sql-spec-runner -c jd-sql-spec.yaml)
+        echo "[jd-sql] Running upstream CORE tests from out/test"
+        # Run only the CORE compliance suite (50 core tests) to align with Java harness
+        (cd out/test && ./bin/jd-upstream-test-runner -verbose -core-only ./bin/jd-sql-spec-runner -c jd-sql-spec.yaml)

@@ -26,43 +26,26 @@ tasks:
       - task -l
 
   test:
-    desc: Alias for jd-spec-test
-    cmds: [ task: spec:test ]
-
-  dev:watch-sql:
-    desc: Watch SQL files and apply + run spec tests on change
-    sources:
-      - sql/postgres/*.sql
-    method: none
-    silent: true
-    cmds:
-      - task: dev:_on-sql-change
-    watch: true
-
-  dev:_on-sql-change:
-    internal: true
-    desc: Detect changed SQL, ensure correct DB is running, apply, (re)build runners, and run spec tests
+    desc: Run Java integration tests (JUnit + Testcontainers)
+    dir: .
     cmds:
       - |
         set -euo pipefail
-        CHANGED="$(ls -1t sql/postgres/*.sql | head -n1)"
-        echo "[jd-sql] Detected change in ${CHANGED}"
-        ENGINE="vanilla"
-        if echo "$CHANGED" | grep -qi 'plv8'; then ENGINE="plv8"; fi
-        echo "[jd-sql] Selected engine: $ENGINE"
-        if [ "$ENGINE" = "plv8" ]; then
-          task pgplv8:ensure-running || exit 1
+        if [ -x ./gradlew ]; then
+          ./gradlew :test-src:java-tests:test --no-daemon
         else
-          task pg:ensure-running || exit 1
+          gradle :test-src:java-tests:test --no-daemon
         fi
-        echo "[jd-sql] Applying ${CHANGED} to database..."
-        PGPASSWORD=${PGPASSWORD:-postgres} psql -v ON_ERROR_STOP=1 -h ${PGHOST:-localhost} -p ${PGPORT:-5432} -U ${PGUSER:-postgres} -d ${PGDATABASE:-postgres} -f "$CHANGED"
-        echo "[jd-sql] Ensuring spec runners are built..."
-        task spec:build-runner
-        task spec:build-upstream
-        echo "[jd-sql] Preparing config for spec run..."
-        if [ "$ENGINE" = "plv8" ]; then CFG="test-src/testdata/jd-sql-spec-runner/configs/postgres-plv8.yaml"; else CFG="test-src/testdata/jd-sql-spec-runner/configs/postgres-plpgsql.yaml"; fi
-        mkdir -p external/jd/spec/test
-        cp "$CFG" external/jd/spec/test/jd-sql-spec.yaml
-        echo "[jd-sql] Running upstream jd spec tests..."
-        (cd external/jd/spec/test && ../../../../out/test/bin/jd-upstream-test-runner ../../../../out/test/bin/jd-sql-spec-runner -c jd-sql-spec.yaml)
+
+  java:watch-sql:
+    desc: Watch SQL and test sources; re-run Java tests on change
+    sources:
+      - sql/**/*.sql
+      - external/jd/spec/test/cases/*.json
+      - test-src/java-tests/src/test/java/**/*.java
+      - test-src/java-tests/src/test/resources/**/*
+    method: none
+    silent: true
+    cmds:
+      - task: test
+    watch: true

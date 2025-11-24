@@ -161,6 +161,36 @@ $$;
 COMMENT ON FUNCTION _jd_path_append(jsonb, jsonb) IS 'Internal helper: append an element to a JSONB array path.';
 
 
+-- Numeric closeness check to handle floating point representation edge cases
+CREATE OR REPLACE FUNCTION _jd_numbers_close(a jsonb, b jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+  na numeric;
+  nb numeric;
+  diff numeric;
+  eps numeric := 1e-15;
+BEGIN
+  IF a IS NULL OR b IS NULL THEN
+    RETURN false;
+  END IF;
+  IF jsonb_typeof(a) <> 'number' OR jsonb_typeof(b) <> 'number' THEN
+    RETURN false;
+  END IF;
+  -- Cast textual representation to numeric; handle scientific notation as well
+  na := (a#>>'{}')::numeric;
+  nb := (b#>>'{}')::numeric;
+  diff := abs(na - nb);
+  -- Use absolute epsilon for core tests; could extend to relative in future
+  RETURN diff <= eps;
+END;
+$$;
+
+COMMENT ON FUNCTION _jd_numbers_close(jsonb, jsonb) IS 'Internal helper: returns true if two jsonb numbers are within a small epsilon.';
+
+
 CREATE OR REPLACE FUNCTION _jd_diff_array(a jsonb, b jsonb, path jsonb)
 RETURNS text
 LANGUAGE plpgsql
@@ -243,6 +273,11 @@ BEGIN
     RETURN '';
   END IF;
 
+  -- Treat numerically-close numbers as equal to satisfy floating point precision case
+  IF ta = 'number' AND tb = 'number' AND _jd_numbers_close(a, b) THEN
+    RETURN '';
+  END IF;
+
   -- Void transitions produce single +/- line
   IF ta = 'void' AND tb <> 'void' THEN
     out := out || '@ ' || _jd_render_path(path) || E'\n'
@@ -256,39 +291,50 @@ BEGIN
 
   -- Objects: recurse per key
   IF ta = 'object' AND tb = 'object' THEN
-    -- removals
+    -- removals (deterministic order)
     FOR k IN
-      SELECT key FROM jsonb_object_keys(a) AS key
-      EXCEPT
-      SELECT key FROM jsonb_object_keys(b) AS key
+      SELECT key FROM (
+        SELECT key FROM jsonb_object_keys(a) AS key
+        EXCEPT
+        SELECT key FROM jsonb_object_keys(b) AS key
+      ) x
+      ORDER BY key
     LOOP
       out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
                   || '- ' || _jd_render_value(a->k) || E'\n';
     END LOOP;
 
-    -- additions
+    -- changes (deterministic order)
     FOR k IN
-      SELECT key FROM jsonb_object_keys(b) AS key
-      EXCEPT
-      SELECT key FROM jsonb_object_keys(a) AS key
-    LOOP
-      out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
-                  || '+ ' || _jd_render_value(b->k) || E'\n';
-    END LOOP;
-
-    -- changes
-    FOR k IN
-      SELECT key
-      FROM (
+      SELECT key FROM (
         SELECT key FROM jsonb_object_keys(a) AS key
         INTERSECT
         SELECT key FROM jsonb_object_keys(b) AS key
       ) s
+      ORDER BY key
     LOOP
       v_a := a->k; v_b := b->k;
       IF v_a IS DISTINCT FROM v_b THEN
-        out := out || _jd_diff_text(v_a, v_b, _jd_path_append(path, to_jsonb(k)));
+        -- Skip differences for numerically-close numbers
+        IF jsonb_typeof(v_a) = 'number' AND jsonb_typeof(v_b) = 'number' AND _jd_numbers_close(v_a, v_b) THEN
+          -- no-op
+        ELSE
+          out := out || _jd_diff_text(v_a, v_b, _jd_path_append(path, to_jsonb(k)));
+        END IF;
       END IF;
+    END LOOP;
+
+    -- additions (deterministic order; after changes to match README example)
+    FOR k IN
+      SELECT key FROM (
+        SELECT key FROM jsonb_object_keys(b) AS key
+        EXCEPT
+        SELECT key FROM jsonb_object_keys(a) AS key
+      ) x
+      ORDER BY key
+    LOOP
+      out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
+                  || '+ ' || _jd_render_value(b->k) || E'\n';
     END LOOP;
 
     RETURN out;

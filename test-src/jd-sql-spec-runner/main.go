@@ -49,35 +49,68 @@ func run() (int, error) {
 }
 
 func parseArgs() (cfgPath string, fileA string, fileB string, err error) {
-	// Primary parser (compatible with -c/--config); ignore unknown flags by parsing manually.
-	var configFlag string
-	fs := flag.NewFlagSet("jd-sql-spec-runner", flag.ContinueOnError)
-	fs.SetOutput(new(nopWriter)) // silence default usage output on error
-	fs.StringVar(&configFlag, "c", "", "config file")
-	fs.StringVar(&configFlag, "config", "", "config file")
-	_ = fs.Parse(os.Args[1:])
+    // Primary parser (compatible with -c/--config); ignore unknown flags by parsing manually.
+    var configFlag string
+    fs := flag.NewFlagSet("jd-sql-spec-runner", flag.ContinueOnError)
+    fs.SetOutput(new(nopWriter)) // silence default usage output on error
+    fs.StringVar(&configFlag, "c", "", "config file")
+    fs.StringVar(&configFlag, "config", "", "config file")
+    _ = fs.Parse(os.Args[1:])
 
-	// Remaining args may include jd flags; the upstream runner guarantees two file paths at the end.
-	args := os.Args[1:]
-	// If we consumed -c <file> or --config <file>, remove them to avoid confusion picking last 2 args.
-	args = stripConfigArgs(args)
+    // Remaining args may include jd flags; the upstream runner may prepend flags and arbitrary args.
+    raw := os.Args[1:]
+    // Remove config flags from view
+    raw = stripConfigArgs(raw)
 
-	if len(args) < 2 {
-		// Try permissive parse from environment
-		var perr error
-		configFlag2, a, b, perr := permissiveParseEnvArgs()
-		if perr != nil {
-			return "", "", "", errors.New("missing input files (expected two file paths at the end)")
-		}
-		if configFlag == "" {
-			configFlag = configFlag2
-		}
-		return resolveConfigPath(configFlag), a, b, nil
-	}
+    // Collect positional (non-flag) args only
+    pos := make([]string, 0, len(raw))
+    for _, s := range raw {
+        if strings.HasPrefix(s, "-") {
+            continue
+        }
+        pos = append(pos, s)
+    }
 
-	a := args[len(args)-2]
-	b := args[len(args)-1]
-	return resolveConfigPath(configFlag), a, b, nil
+    // Enforce exactly two positional inputs for diff mode
+    if len(pos) < 2 {
+        // Try permissive parse from environment
+        configFlag2, a, b, perr := permissiveParseEnvArgs()
+        if perr != nil {
+            return "", "", "", errors.New("missing input files (expected two file paths)")
+        }
+        if configFlag == "" {
+            configFlag = configFlag2
+        }
+        // Validate existence
+        if err := ensureFilesExist(a, b); err != nil {
+            return "", "", "", err
+        }
+        return resolveConfigPath(configFlag), a, b, nil
+    }
+    if len(pos) > 2 {
+        return "", "", "", errors.New("too many input files (expected two)")
+    }
+
+    a := pos[len(pos)-2]
+    b := pos[len(pos)-1]
+    if err := ensureFilesExist(a, b); err != nil {
+        return "", "", "", err
+    }
+    return resolveConfigPath(configFlag), a, b, nil
+}
+
+func ensureFilesExist(a, b string) error {
+    if a != "" {
+        if _, err := os.Stat(a); err != nil {
+            return fmt.Errorf("input file does not exist: %s", a)
+        }
+    }
+    if b != "" {
+        if _, err := os.Stat(b); err != nil {
+            return fmt.Errorf("input file does not exist: %s", b)
+        }
+    }
+    return nil
 }
 
 func stripConfigArgs(args []string) []string {

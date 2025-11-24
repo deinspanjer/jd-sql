@@ -51,6 +51,20 @@ TODO: add installation instructions for each implementation
 We provide a Docker-based development environment for each supported implementation.
 Check the doc folder for your implementation for details.
 
+### Java integration tests (JUnit + Testcontainers)
+
+Java-based integration tests for jd-sql now live under `test-src/java-tests` as a Gradle subproject.
+
+- Location: `test-src/java-tests`
+- Test sources: `test-src/java-tests/src/test/java`
+- Test resources (optional project-specific cases): `test-src/java-tests/src/test/resources`
+- Run tests: `task test` (or `./gradlew :test-src:java-tests:test`)
+- Watch SQL and re-run tests on change: `task --watch dev:watch-sql` (includes Java tests via `java:watch-sql`)
+
+Notes:
+- The tests use Testcontainers to start a disposable PostgreSQL and install the SQL from `sql/postgres/*.sql` before executing spec cases.
+- The test harness also runs the upstream jd CORE cases; you can add project-specific cases under `test-src/java-tests/src/test/resources/jd-sql/cases`.
+
 ### Upstream jd submodule and spec tests
 
 This repository includes the upstream josephburnett/jd project as a Git submodule under external/jd. We use it primarily to view upstream code and run/port spec tests.
