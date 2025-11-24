@@ -69,10 +69,12 @@ public class PgSpecIT {
         return tests;
     }
 
+    @SuppressWarnings("resource")
     private List<DynamicTest> createContainerBackedTests(Path sqlFile, List<SpecCase> cases) {
         List<DynamicTest> tests = new ArrayList<>();
         tests.add(DynamicTest.dynamicTest("pg-container:start:" + sqlFile.getFileName(), () -> {
             DockerImageName image = DockerImageName.parse("postgres:17");
+            @SuppressWarnings("resource")
             PostgreSQLContainer<?> pg = new PostgreSQLContainer<>(image)
                     .withDatabaseName("postgres")
                     .withUsername("postgres")
@@ -136,12 +138,6 @@ public class PgSpecIT {
         return tests;
     }
 
-    private static String jdbcUrlForDb(PostgreSQLContainer<?> pg, String dbName) {
-        String host = pg.getHost();
-        Integer port = pg.getMappedPort(5432);
-        return "jdbc:postgresql://" + host + ":" + port + "/" + dbName;
-    }
-
     private static void installSql(PostgreSQLContainer<?> pg, Path sqlFile, String dbName) {
         // Copy SQL file into the container and execute with psql to properly handle dollar-quoting and multiple statements
         String containerPath = "/tmp/jd_install.sql";
@@ -164,6 +160,7 @@ public class PgSpecIT {
 
     // No database recreation needed when using one container per SQL file.
 
+    @SuppressWarnings("SameParameterValue")
     private static boolean functionExists(Connection conn, String name, int argCount) throws SQLException {
         String q = "select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace " +
                 "where n.nspname='public' and p.proname=? and p.pronargs=?";

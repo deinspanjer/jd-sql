@@ -34,7 +34,7 @@ dependencies {
 // as Test Resources for this module. This way they appear under the module as
 // "Test Resources" and are on the test runtime classpath in both Gradle and IDE runs.
 sourceSets {
-    val test by getting {
+    @Suppress("unused") val test by getting {
         resources {
             // Upstream jd spec runner resources (JSON cases, YAML, etc.)
             srcDir(rootProject.file("external/jd/spec/test"))
@@ -64,11 +64,11 @@ tasks.test {
     outputs.upToDateWhen { false }
 
     // Print a concise summary at the end of the test run
-    addTestListener(object : org.gradle.api.tasks.testing.TestListener {
-        override fun beforeSuite(suite: org.gradle.api.tasks.testing.TestDescriptor) {}
-        override fun beforeTest(testDescriptor: org.gradle.api.tasks.testing.TestDescriptor) {}
-        override fun afterTest(testDescriptor: org.gradle.api.tasks.testing.TestDescriptor, result: org.gradle.api.tasks.testing.TestResult) {}
-        override fun afterSuite(suite: org.gradle.api.tasks.testing.TestDescriptor, result: org.gradle.api.tasks.testing.TestResult) {
+    addTestListener(object : TestListener {
+        override fun beforeSuite(suite: TestDescriptor) {}
+        override fun beforeTest(testDescriptor: TestDescriptor) {}
+        override fun afterTest(testDescriptor: TestDescriptor, result: TestResult) {}
+        override fun afterSuite(suite: TestDescriptor, result: TestResult) {
             if (suite.parent == null) {
                 println("\n==== Test Summary ====")
                 println("Result: ${result.resultType}")
