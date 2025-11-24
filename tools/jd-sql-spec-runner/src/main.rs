@@ -18,7 +18,16 @@ struct Config {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "jd-sql-spec-runner", about = "jd-sql test harness calling SQL implementation")]
+#[command(
+    name = "jd-sql-spec-runner",
+    about = "jd-sql test harness calling SQL implementation",
+    // Be permissive: we'll manually fall back if parse fails
+    disable_help_flag = true,
+    disable_version_flag = true,
+    allow_hyphen_values = true,
+    trailing_var_arg = true,
+    allow_missing_positional = true,
+)]
 struct Cli {
     /// Path to YAML config file for selecting SQL engine and query
     /// If omitted, the runner will search for jd-sql-spec.yaml in:
@@ -33,6 +42,7 @@ struct Cli {
     file2: Option<PathBuf>,
 
     /// Additional args (ignored for now; reserved for jd-like flags)
+    // Capture all remaining positional args (typically flags + two file paths from upstream)
     #[arg(last = true)]
     extra: Vec<String>,
 }
@@ -50,7 +60,20 @@ async fn main() {
 }
 
 async fn run() -> Result<i32> {
-    let cli = Cli::parse();
+    // Try to parse CLI. If clap rejects unknown jd flags, fall back to permissive parsing.
+    let cli = match Cli::try_parse() {
+        Ok(c) => c,
+        Err(_e) => {
+            // Build a minimal Cli by scanning env args for -c/--config and using the last two args as files
+            let (cfg_opt, f1, f2) = permissive_parse_env_args()?;
+            Cli {
+                config: cfg_opt,
+                file1: Some(f1),
+                file2: Some(f2),
+                extra: vec![],
+            }
+        }
+    };
 
     // The upstream spec runner passes args first, then two file paths. We tolerate extra args.
     let (file1, file2) = parse_files_from_args(&cli)?;
@@ -114,9 +137,62 @@ fn parse_files_from_args(cli: &Cli) -> Result<(PathBuf, PathBuf)> {
             }
         }
     }
+    // As a last resort, scan env args to extract files
+    if a.is_none() || b.is_none() {
+        if let Ok((_, pa, pb)) = permissive_parse_env_args() {
+            a = Some(pa);
+            b = Some(pb);
+        }
+    }
+
     let a = a.ok_or_else(|| anyhow!("missing first input file argument"))?;
     let b = b.ok_or_else(|| anyhow!("missing second input file argument"))?;
     Ok((a, b))
+}
+
+fn permissive_parse_env_args() -> Result<(Option<PathBuf>, PathBuf, PathBuf)> {
+    let mut args: Vec<String> = std::env::args().collect();
+    // Drop argv[0]
+    if !args.is_empty() {
+        args.remove(0);
+    }
+
+    // Extract config if present
+    let mut cfg: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "-c" || a == "--config" {
+            // Next token is the file path if present
+            if i + 1 < args.len() {
+                cfg = Some(PathBuf::from(args[i + 1].clone()));
+                // Remove the flag and its value to avoid confusing file extraction
+                args.drain(i..=i + 1);
+                continue; // don't increment i
+            } else {
+                // Flag present without value; ignore
+                args.remove(i);
+                continue;
+            }
+        } else if let Some(rest) = a.strip_prefix("-c=") {
+            cfg = Some(PathBuf::from(rest));
+            args.remove(i);
+            continue;
+        } else if let Some(rest) = a.strip_prefix("--config=") {
+            cfg = Some(PathBuf::from(rest));
+            args.remove(i);
+            continue;
+        }
+        i += 1;
+    }
+
+    // Now take the last two remaining args as files (upstream guarantees these)
+    if args.len() < 2 {
+        return Err(anyhow!("missing input files (expected two file paths at the end)"));
+    }
+    let b = PathBuf::from(args.pop().unwrap());
+    let a = PathBuf::from(args.pop().unwrap());
+    Ok((cfg, a, b))
 }
 
 enum QueryResult {

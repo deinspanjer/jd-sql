@@ -64,6 +64,7 @@ DECLARE
   k text;
   v jsonb;
   first boolean;
+  num numeric;
 BEGIN
   -- SQL NULL indicates no value (should not normally occur for real JSON values)
   IF j IS NULL THEN
@@ -100,8 +101,20 @@ BEGIN
     out := out || ']';
     RETURN out;
   ELSE
-    -- Scalars: Postgres jsonb::text is already compact and correct for strings/numbers/booleans/null
-    RETURN j::text;
+    -- Scalars: Render numbers without trailing .0 when integral; otherwise use jsonb::text
+    IF t = 'number' THEN
+      -- Extract textual representation of the root numeric and cast to numeric once
+      num := (j#>>'{}')::numeric;
+      IF num = round(num, 0) THEN
+        -- Render integral numerics without fractional part using numeric::text directly
+        RETURN (round(num, 0))::numeric::text;
+      ELSE
+        RETURN j::text; -- preserve original compact JSON number
+      END IF;
+    ELSE
+      -- For non-number scalars (string/boolean/null): Postgres jsonb::text is compact and correct
+      RETURN j::text;
+    END IF;
   END IF;
 END;
 $$;

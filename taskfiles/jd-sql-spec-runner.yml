@@ -25,6 +25,7 @@ tasks:
     vars:
       CFG: '{{.CFG | default "tools/jd-sql-spec-runner/configs/postgres-plpgsql.yaml"}}'
     cmds:
+      - task: :pg:install-sql
       - task: build-runner
       - task: build-upstream
       - |

@@ -25,71 +25,9 @@ tasks:
     cmds:
       - task -l
 
-  # Convenience aliases mirroring old Makefile targets
-  docker-pg-build:
-    desc: Build vanilla Postgres dev image (alias)
-    cmds: [ task: pg:build-vanilla ]
-
-  docker-pg-build-vanilla:
-    desc: Build vanilla Postgres dev image
-    cmds: [ task: pg:build-vanilla ]
-
-  docker-pg-build-plv8:
-    desc: Build PLV8 Postgres image from source
-    cmds: [ task: pgplv8:build-plv8 ]
-
-  docker-pg-build-plv8-prebuilt:
-    desc: Build PLV8 prebuilt image wrapper
-    cmds: [ task: pgplv8:build-prebuilt ]
-
-  docker-pg-run:
-    desc: Run the dev Postgres container (vanilla by default). Override with PG_RUN_IMAGE=...
-    vars:
-      PG_RUN_IMAGE: '{{.PG_RUN_IMAGE | default .PG_IMAGE_NAME_VANILLA}}'
-    cmds:
-      - task: pg:run
-        vars:
-          PG_RUN_IMAGE: '{{.PG_RUN_IMAGE}}'
-
-  docker-pg-stop:
-    desc: Stop and remove the dev Postgres container
-    cmds: [ task: pg:stop ]
-
-  docker-pg-shell:
-    desc: Open a psql shell into the running container
-    cmds: [ task: pg:shell ]
-
-  pg-install:
-    desc: Install PL/pgSQL functions to local/dev Postgres
-    cmds: [ task: pg:install-sql ]
-
-  pg-smoke:
-    desc: Run simple smoke queries against jd_diff
-    cmds: [ task: pg:smoke ]
-
-  jd-submodule-init:
-    desc: Initialize and update external/jd submodule
-    cmds: [ task: jd:submodule-init ]
-
-  jd-submodule-update:
-    desc: Update external/jd submodule on current branch
-    cmds: [ task: jd:submodule-update ]
-
-  jd-spec-pull:
-    desc: Checkout a specific ref in external/jd (use REF=...)
-    cmds: [ task: jd:spec-pull ]
-
-  jd-spec-build-runner:
-    desc: Build Rust jd-sql-spec-runner
-    cmds: [ task: spec:build-runner ]
-
-  jd-spec-test:
-    desc: Run upstream jd spec tests using jd-sql-spec-runner (Postgres)
-    cmds: [ task: spec:test ]
-
   test:
     desc: Alias for jd-spec-test
-    cmds: [ task: jd-spec-test ]
+    cmds: [ task: spec:test ]
 
   dev:watch-sql:
     desc: Watch SQL files and apply + run spec tests on change
