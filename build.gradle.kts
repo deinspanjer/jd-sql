@@ -6,4 +6,9 @@ allprojects {
     repositories {
         mavenCentral()
     }
+
+    // Direct all Gradle build outputs into the project-level out/ directory
+    // This keeps the working tree clean and avoids unversioned files outside of out/
+    // Example structure: out/gradle/test-src/java-tests/...
+    buildDir = file("${rootDir}/out/gradle/${project.path.replace(":", "/").trimStart('/')}")
 }

@@ -1,3 +1,8 @@
-# Ignore build artifacts from the Rust spec test harness runner
-# The Cargo build outputs are placed under this directory and should not be versioned
+# Project build/test outputs (jd-sql uses out/ for all generated artifacts)
 out
+
+# Gradle local caches and state (should never be committed)
+.gradle/
+
+# Note: keep Gradle Wrapper scripts and binaries versioned
+# (gradlew, gradlew.bat, gradle/wrapper/**) – required for reproducible builds
