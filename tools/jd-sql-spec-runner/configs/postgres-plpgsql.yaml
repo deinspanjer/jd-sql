@@ -1,0 +1,4 @@
+engine: postgres
+dsn: postgres://postgres:postgres@localhost:5432/postgres
+sql: |
+  SELECT jd_diff($1::jsonb, $2::jsonb)

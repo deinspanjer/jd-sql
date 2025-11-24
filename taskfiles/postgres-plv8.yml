@@ -1,0 +1,63 @@
+version: '3'
+
+vars:
+  PG_DEV_CONTAINER_NAME: '{{.PG_DEV_CONTAINER_NAME | default "jd-sql-pg-dev"}}'
+  POSTGRES_MAJOR: '{{.POSTGRES_MAJOR | default "17"}}'
+  PLV8_VERSION: '{{.PLV8_VERSION | default "3.2.4"}}'
+  PLV8_BRANCH: '{{.PLV8_BRANCH | default "r3.2"}}'
+  PREBUILT_PLV8_TAG: '{{.PREBUILT_PLV8_TAG | default "18"}}'
+  PG_IMAGE_NAME_PLV8: 'jd-sql-pg-plv8:{{.POSTGRES_MAJOR}}'
+  PG_IMAGE_NAME_PLV8_PREBUILT: 'jd-sql-pg-plv8-prebuilt:{{.PREBUILT_PLV8_TAG}}'
+
+tasks:
+  build-plv8:
+    desc: Build Postgres image with PLV8 from source
+    cmds:
+      - |
+        docker build \
+          --build-arg PG_CONTAINER_VERSION={{.POSTGRES_MAJOR}} \
+          --build-arg PLV8_VERSION={{.PLV8_VERSION}} \
+          --build-arg PLV8_BRANCH={{.PLV8_BRANCH}} \
+          -f docker/postgres-plv8.Dockerfile \
+          -t {{.PG_IMAGE_NAME_PLV8}} .
+
+  build-prebuilt:
+    desc: Build wrapper image based on prebuilt PLV8 image
+    cmds:
+      - |
+        docker build \
+          --build-arg PREBUILT_PLV8_TAG={{.PREBUILT_PLV8_TAG}} \
+          -f docker/postgres-plv8-prebuilt.Dockerfile \
+          -t {{.PG_IMAGE_NAME_PLV8_PREBUILT}} .
+
+  run:
+    desc: Run dev Postgres container using PLV8 image by default
+    vars:
+      PG_RUN_IMAGE: '{{.PG_RUN_IMAGE | default .PG_IMAGE_NAME_PLV8}}'
+    cmds:
+      - |
+        docker run --name {{.PG_DEV_CONTAINER_NAME}} \
+          -e POSTGRES_PASSWORD=postgres \
+          -p 5432:5432 -d {{.PG_RUN_IMAGE}}
+
+  ensure-running:
+    desc: Ensure dev Postgres container is running (PLV8 preference)
+    silent: true
+    cmds:
+      - |
+        set -e
+        DESIRED_IMAGE='{{.PG_IMAGE_NAME_PLV8}}'
+        if docker ps -a --format '{{`{{.Names}}`}}' | grep -q '^{{.PG_DEV_CONTAINER_NAME}}$'; then
+          CURRENT_IMAGE=$(docker inspect -f '{{`{{.Config.Image}}`}}' {{.PG_DEV_CONTAINER_NAME}})
+          if [ "$CURRENT_IMAGE" != "$DESIRED_IMAGE" ]; then
+            echo "[jd-sql] Existing container uses $CURRENT_IMAGE, but $DESIRED_IMAGE is required. Recreating..."
+            docker rm -f {{.PG_DEV_CONTAINER_NAME}} >/dev/null 2>&1 || true
+          fi
+        fi
+        if ! docker ps --format '{{`{{.Names}}`}}' | grep -q '^{{.PG_DEV_CONTAINER_NAME}}$'; then
+          if docker ps -a --format '{{`{{.Names}}`}}' | grep -q '^{{.PG_DEV_CONTAINER_NAME}}$'; then
+            docker start {{.PG_DEV_CONTAINER_NAME}}
+          else
+            task: run
+          fi
+        fi

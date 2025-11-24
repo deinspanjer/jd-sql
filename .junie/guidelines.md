@@ -22,13 +22,16 @@ It is focused on a human-readable diff format but has the ability to read and pr
 ## File Structure
 
 - `README.md` - Information about installation, usage and diff format
-- `Makefile` - Project commands
+- `Taskfile.yml` - Project tasks using Task (primary build/automation)
+- `/taskfiles` - Modular sub-taskfiles (Postgres images/containers, jd subproject, spec runner, engine stubs)
 - `/doc` - Plans and documents
 - `/docker` - Dockerfiles for testing
 - `/examples` - Various examples of usage
 - `/sql` - SQL files for installing the function to a PostgreSQL database
+- `/tools/jd-sql-spec-runner` - Rust test harness and configs used to run upstream jd spec tests against jd-sql
 
 ### Reference code for porting
+- `/external/jd/CLAUDE.md` - Guidelines provided by the original jd project for LLM assistance
 - `/external/jd/v2` - V2 library
 - `/external/jd/v2/jd/main.go` - V2 commandline
 - `/external/jd/doc` - Plans and documents

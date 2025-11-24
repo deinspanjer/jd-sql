@@ -15,16 +15,16 @@ Build
 -----
 
 - Default simple build (vanilla Postgres, defaults to 17):
-  make docker-pg-build
+  task docker-pg-build
 
 - Build vanilla for a different major (e.g., 18):
-  POSTGRES_MAJOR=18 make docker-pg-build
+  POSTGRES_MAJOR=18 task docker-pg-build
 
 - Build plv8 from source (uses POSTGRES_MAJOR, plus optional PLV8_VERSION and PLV8_BRANCH):
-  make docker-pg-build-plv8
+  task docker-pg-build-plv8
 
 - Build prebuilt plv8 image for a specific upstream tag (e.g., 18.0.0-beta.3):
-  PREBUILT_PLV8_TAG=18.0.0-beta.3 make docker-pg-build-plv8-prebuilt
+  PREBUILT_PLV8_TAG=18.0.0-beta.3 task docker-pg-build-plv8-prebuilt
 
 Images are tagged as:
 - vanilla: jd-sql-pg-vanilla:<major> (e.g., jd-sql-pg-vanilla:17)
@@ -37,16 +37,16 @@ Run
 - Single dev container name: jd-sql-pg-dev
 
 - Start the dev container (defaults to vanilla image, port 5432):
-  make docker-pg-run
+  task docker-pg-run
 
 - Run using a specific image (e.g., plv8 source-built for PG 18):
-  PG_RUN_IMAGE=jd-sql-pg-plv8:18 make docker-pg-run
+  PG_RUN_IMAGE=jd-sql-pg-plv8:18 task docker-pg-run
 
 - Open a psql shell to the running container:
-  make docker-pg-shell
+  task docker-pg-shell
 
 - Stop and remove the container:
-  make docker-pg-stop
+  task docker-pg-stop
 
 Running jd-sql SQL tests
 -----------------------
@@ -55,8 +55,8 @@ The repository includes an initial PL/pgSQL implementation of jd-sql for Postgre
 
 1) Start the Postgres container (vanilla by default) and open a shell:
 
-  make docker-pg-run
-  make docker-pg-shell
+  task docker-pg-run
+  task docker-pg-shell
 
 2) From the psql prompt, run the tests:
 
@@ -91,11 +91,11 @@ Advanced overrides (examples):
 
 - Build for Postgres 16 with a specific plv8 version and branch:
 
-  POSTGRES_MAJOR=16 PLV8_VERSION=3.2.4 PLV8_BRANCH=r3.2 make docker-pg-build-plv8
+  POSTGRES_MAJOR=16 PLV8_VERSION=3.2.4 PLV8_BRANCH=r3.2 task docker-pg-build-plv8
 
 - Build prebuilt plv8 for PG 18 beta tag:
 
-  PREBUILT_PLV8_TAG=18.0.0-beta.3 make docker-pg-build-plv8-prebuilt
+  PREBUILT_PLV8_TAG=18.0.0-beta.3 task docker-pg-build-plv8-prebuilt
 
 If you previously relied on pre-built plv8 images, note that this flow does a source build inside the Docker build; network access to fetch plv8 sources is required.
 

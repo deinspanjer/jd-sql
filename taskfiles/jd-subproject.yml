@@ -1,0 +1,28 @@
+version: '3'
+
+tasks:
+  submodule-init:
+    desc: Initialize and update external/jd git submodule
+    cmds:
+      - git submodule update --init --recursive
+      - git submodule status
+
+  submodule-update:
+    desc: Fetch and fast-forward pull the current branch inside external/jd
+    cmds:
+      - |
+        echo "Updating external/jd from upstream..."
+        (cd external/jd && git fetch --all --tags && git checkout $(git rev-parse --abbrev-ref HEAD) && git pull --ff-only) || true
+        git submodule status
+
+  spec-pull:
+    desc: Checkout a specific ref (REF=tag/branch/commit) inside external/jd
+    vars:
+      REF: '{{.REF}}'
+    cmds:
+      - |
+        if [ -z "{{.REF}}" ]; then
+          echo "Set REF to a tag/branch/commit, e.g.: task jd:spec-pull -- REF=v2.2.0" >&2; exit 2; fi
+      - |
+        (cd external/jd && git fetch --all --tags && git checkout {{.REF}})
+      - git submodule status

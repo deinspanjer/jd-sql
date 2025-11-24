@@ -1,0 +1,130 @@
+version: '3'
+
+# Root Taskfile orchestrating development tasks. See ./taskfiles for sub-taskfiles.
+
+vars:
+  POSTGRES_MAJOR: '{{.POSTGRES_MAJOR | default "17"}}'
+  PLV8_VERSION: '{{.PLV8_VERSION | default "3.2.4"}}'
+  PLV8_BRANCH: '{{.PLV8_BRANCH | default "r3.2"}}'
+  PREBUILT_PLV8_TAG: '{{.PREBUILT_PLV8_TAG | default "18"}}'
+  PG_DEV_CONTAINER_NAME: '{{.PG_DEV_CONTAINER_NAME | default "jd-sql-pg-dev"}}'
+  PG_IMAGE_NAME_VANILLA: 'jd-sql-pg-vanilla:{{.POSTGRES_MAJOR}}'
+  PG_IMAGE_NAME_PLV8: 'jd-sql-pg-plv8:{{.POSTGRES_MAJOR}}'
+  PG_IMAGE_NAME_PLV8_PREBUILT: 'jd-sql-pg-plv8-prebuilt:{{.PREBUILT_PLV8_TAG}}'
+
+includes:
+  pg: ./taskfiles/postgres-vanilla.yml
+  pgplv8: ./taskfiles/postgres-plv8.yml
+  spec: ./taskfiles/jd-sql-spec-runner.yml
+  jd: ./taskfiles/jd-subproject.yml
+  engines: ./taskfiles/engines-stubs.yml
+
+tasks:
+  default:
+    desc: Show common tasks
+    cmds:
+      - task -l
+
+  # Convenience aliases mirroring old Makefile targets
+  docker-pg-build:
+    desc: Build vanilla Postgres dev image (alias)
+    cmds: [ task: pg:build-vanilla ]
+
+  docker-pg-build-vanilla:
+    desc: Build vanilla Postgres dev image
+    cmds: [ task: pg:build-vanilla ]
+
+  docker-pg-build-plv8:
+    desc: Build PLV8 Postgres image from source
+    cmds: [ task: pgplv8:build-plv8 ]
+
+  docker-pg-build-plv8-prebuilt:
+    desc: Build PLV8 prebuilt image wrapper
+    cmds: [ task: pgplv8:build-prebuilt ]
+
+  docker-pg-run:
+    desc: Run the dev Postgres container (vanilla by default). Override with PG_RUN_IMAGE=...
+    vars:
+      PG_RUN_IMAGE: '{{.PG_RUN_IMAGE | default .PG_IMAGE_NAME_VANILLA}}'
+    cmds:
+      - task: pg:run
+        vars:
+          PG_RUN_IMAGE: '{{.PG_RUN_IMAGE}}'
+
+  docker-pg-stop:
+    desc: Stop and remove the dev Postgres container
+    cmds: [ task: pg:stop ]
+
+  docker-pg-shell:
+    desc: Open a psql shell into the running container
+    cmds: [ task: pg:shell ]
+
+  pg-install:
+    desc: Install PL/pgSQL functions to local/dev Postgres
+    cmds: [ task: pg:install-sql ]
+
+  pg-smoke:
+    desc: Run simple smoke queries against jd_diff
+    cmds: [ task: pg:smoke ]
+
+  jd-submodule-init:
+    desc: Initialize and update external/jd submodule
+    cmds: [ task: jd:submodule-init ]
+
+  jd-submodule-update:
+    desc: Update external/jd submodule on current branch
+    cmds: [ task: jd:submodule-update ]
+
+  jd-spec-pull:
+    desc: Checkout a specific ref in external/jd (use REF=...)
+    cmds: [ task: jd:spec-pull ]
+
+  jd-spec-build-runner:
+    desc: Build Rust jd-sql-spec-runner
+    cmds: [ task: spec:build-runner ]
+
+  jd-spec-test:
+    desc: Run upstream jd spec tests using jd-sql-spec-runner (Postgres)
+    cmds: [ task: spec:test ]
+
+  test:
+    desc: Alias for jd-spec-test
+    cmds: [ task: jd-spec-test ]
+
+  dev:watch-sql:
+    desc: Watch SQL files and apply + run spec tests on change
+    sources:
+      - sql/postgres/*.sql
+    method: none
+    silent: true
+    cmds:
+      - task: dev:_on-sql-change
+    watch: true
+
+  dev:_on-sql-change:
+    internal: true
+    desc: Detect changed SQL, ensure correct DB is running, apply, (re)build runners, and run spec tests
+    cmds:
+      - |
+        set -euo pipefail
+        CHANGED="$(ls -1t sql/postgres/*.sql | head -n1)"
+        echo "[jd-sql] Detected change in ${CHANGED}"
+        ENGINE="vanilla"
+        if echo "$CHANGED" | grep -qi 'plv8'; then ENGINE="plv8"; fi
+        echo "[jd-sql] Selected engine: $ENGINE"
+        if [ "$ENGINE" = "plv8" ]; then
+          task pgplv8:ensure-running || exit 1
+        else
+          task pg:ensure-running || exit 1
+        fi
+        echo "[jd-sql] Applying ${CHANGED} to database..."
+        PGPASSWORD=${PGPASSWORD:-postgres} psql -v ON_ERROR_STOP=1 -h ${PGHOST:-localhost} -p ${PGPORT:-5432} -U ${PGUSER:-postgres} -d ${PGDATABASE:-postgres} -f "$CHANGED"
+        echo "[jd-sql] Ensuring spec runners are built..."
+        task spec:build-runner
+        task spec:build-upstream
+        echo "[jd-sql] Preparing config for spec run..."
+        if [ "$ENGINE" = "plv8" ]; then CFG="tools/jd-sql-spec-runner/configs/postgres-plv8.yaml"; else CFG="tools/jd-sql-spec-runner/configs/postgres-plpgsql.yaml"; fi
+        mkdir -p external/jd/spec/test
+        cp "$CFG" external/jd/spec/test/jd-sql-spec.yaml
+        echo "[jd-sql] Running upstream jd spec tests..."
+        (cd external/jd/spec/test && ../../../../tools/bin/jd-upstream-test-runner ../../../../tools/jd-sql-spec-runner/target/release/jd-sql-spec-runner -c jd-sql-spec.yaml)

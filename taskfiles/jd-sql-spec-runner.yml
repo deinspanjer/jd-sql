@@ -1,0 +1,42 @@
+version: '3'
+
+tasks:
+  build-runner:
+    desc: Build the Rust jd-sql-spec-runner (release)
+    dir: tools/jd-sql-spec-runner
+    cmds:
+      - |
+        mkdir -p ../../out/test/bin
+        # Build Rust runner into the project compiler output dir
+        cargo install --target-dir ../../out --root ../../out/test --path .
+
+  build-upstream:
+    desc: Build upstream Go spec test-runner for host arch (overrides any bundled binary)
+    dir: external/jd/spec/test
+    cmds:
+      - |
+        echo "[jd-sql] Building upstream jd/spec/test runner for $(go env GOOS)/$(go env GOARCH)"
+        # Build into the project compiler output dir to avoid dirtying external/jd
+        mkdir -p ../../../../out/test/bin
+        go build -o ../../../../out/test/bin/jd-upstream-test-runner .
+
+  test:
+    desc: Run upstream jd specifications via jd-sql-spec-runner (Postgres)
+    vars:
+      CFG: '{{.CFG | default "tools/jd-sql-spec-runner/configs/postgres-plpgsql.yaml"}}'
+    cmds:
+      - task: build-runner
+      - task: build-upstream
+      - |
+        set -euo pipefail
+        echo "[jd-sql] Staging upstream spec tests under out/test..."
+        # Prepare test workspace
+        mkdir -p out/test
+        rm -f out/test/test-results.json
+        # Copy needed upstream test files
+        cp -R external/jd/spec/test/cases out/test
+        cp -R external/jd/spec/test/testdata out/test
+        # Provide jd-sql runner config as jd-sql-spec.yaml in the workspace
+        cp "{{.CFG}}" out/test/jd-sql-spec.yaml
+        echo "[jd-sql] Running upstream tests from out/test"
+        (cd out/test && ./bin/jd-upstream-test-runner -verbose ./bin/jd-sql-spec-runner -c jd-sql-spec.yaml)

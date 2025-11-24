@@ -1,0 +1,80 @@
+version: '3'
+
+vars:
+  PG_DEV_CONTAINER_NAME: '{{.PG_DEV_CONTAINER_NAME | default "jd-sql-pg-dev"}}'
+  POSTGRES_MAJOR: '{{.POSTGRES_MAJOR | default "17"}}'
+  PG_IMAGE_NAME_VANILLA: 'jd-sql-pg-vanilla:{{.POSTGRES_MAJOR}}'
+
+tasks:
+  build-vanilla:
+    desc: Build vanilla Postgres image
+    cmds:
+      - |
+        docker build \
+          --build-arg POSTGRES_MAJOR={{.POSTGRES_MAJOR}} \
+          -f docker/postgres.Dockerfile \
+          -t {{.PG_IMAGE_NAME_VANILLA}} .
+
+  run:
+    desc: Run dev Postgres container (vanilla by default)
+    vars:
+      PG_RUN_IMAGE: '{{.PG_RUN_IMAGE | default .PG_IMAGE_NAME_VANILLA}}'
+    cmds:
+      - |
+        docker run --name {{.PG_DEV_CONTAINER_NAME}} \
+          -e POSTGRES_PASSWORD=postgres \
+          -p 5432:5432 -d {{.PG_RUN_IMAGE}}
+
+  ensure-running:
+    desc: Ensure dev Postgres container is running (vanilla)
+    silent: true
+    cmds:
+      - |
+        set -e
+        DESIRED_IMAGE='{{.PG_IMAGE_NAME_VANILLA}}'
+        if docker ps -a --format '{{`{{.Names}}`}}' | grep -q '^{{.PG_DEV_CONTAINER_NAME}}$'; then
+          CURRENT_IMAGE=$(docker inspect -f '{{`{{.Config.Image}}`}}' {{.PG_DEV_CONTAINER_NAME}})
+          if [ "$CURRENT_IMAGE" != "$DESIRED_IMAGE" ]; then
+            echo "[jd-sql] Existing container uses $CURRENT_IMAGE, but $DESIRED_IMAGE is required. Recreating..."
+            docker rm -f {{.PG_DEV_CONTAINER_NAME}} >/dev/null 2>&1 || true
+          fi
+        fi
+        if ! docker ps --format '{{`{{.Names}}`}}' | grep -q '^{{.PG_DEV_CONTAINER_NAME}}$'; then
+          if docker ps -a --format '{{`{{.Names}}`}}' | grep -q '^{{.PG_DEV_CONTAINER_NAME}}$'; then
+            docker start {{.PG_DEV_CONTAINER_NAME}}
+          else
+            task: run
+          fi
+        fi
+
+  stop:
+    desc: Stop and remove the dev Postgres container
+    cmds:
+      - |
+        docker rm -f {{.PG_DEV_CONTAINER_NAME}} || true
+
+  shell:
+    desc: Open psql shell in the container
+    cmds:
+      - docker exec -it {{.PG_DEV_CONTAINER_NAME}} psql -U postgres
+
+  install-sql:
+    desc: Install PL/pgSQL functions into Postgres
+    cmds:
+      - |
+        echo "[jd-sql] Installing PL/pgSQL functions"
+        PGPASSWORD=${PGPASSWORD:-postgres} psql -v ON_ERROR_STOP=1 -h ${PGHOST:-localhost} -p ${PGPORT:-5432} -U ${PGUSER:-postgres} -d ${PGDATABASE:-postgres} \
+          -f sql/postgres/jd_pg_plpgsql.sql
+
+  smoke:
+    desc: Run quick smoke tests
+    cmds:
+      - |
+        PGPASSWORD=${PGPASSWORD:-postgres} psql -X -v ON_ERROR_STOP=1 -h ${PGHOST:-localhost} -p ${PGPORT:-5432} -U ${PGUSER:-postgres} -d ${PGDATABASE:-postgres} -c \
+          "SELECT jd_diff('{\"a\":1}'::jsonb, '{\"a\":2}'::jsonb) AS simple_object_value_change;"
+      - |
+        PGPASSWORD=${PGPASSWORD:-postgres} psql -X -v ON_ERROR_STOP=1 -h ${PGHOST:-localhost} -p ${PGPORT:-5432} -U ${PGUSER:-postgres} -d ${PGDATABASE:-postgres} -c \
+          "SELECT jd_diff('{\"foo\":[\"bar\",\"baz\"]}'::jsonb, '{\"foo\":[\"bar\",\"boom\"]}'::jsonb) AS array_element_change;"
+      - |
+        PGPASSWORD=${PGPASSWORD:-postgres} psql -X -v ON_ERROR_STOP=1 -h ${PGHOST:-localhost} -p ${PGPORT:-5432} -U ${PGUSER:-postgres} -d ${PGDATABASE:-postgres} -c \
+          "SELECT jd_diff('null'::jsonb, '{\"a\":1}'::jsonb) AS null_to_object;"

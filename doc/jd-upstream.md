@@ -11,18 +11,18 @@ Location:
 - Specs of interest live under external/jd/spec/test (cases and testdata).
 
 First-time setup after cloning jd-sql:
-- make jd-submodule-init
+- task jd-submodule-init
 
 Updating to the latest upstream (fast-forward on current submodule branch):
-- make jd-submodule-update
+- task jd-submodule-update
 
 Checking out a specific tag/branch/commit inside the submodule:
-- make jd-spec-pull REF=v2.2.0
+- task jd-spec-pull -- REF=v2.2.0
 
-Running upstream spec tests (placeholder):
+Running upstream spec tests:
 - A test wrapper will be provided in jd-sql to execute upstream jd spec cases against jd-sql implementations.
 - For now, you can list available cases:
-  - make jd-spec-test
+  - task jd-spec-test
 
 Notes:
 - Submodules are referenced by commit. After updating the submodule, commit the new submodule pointer in jd-sql to record the exact upstream version.

@@ -1,0 +1,5 @@
+engine: postgres
+dsn: postgres://postgres:postgres@localhost:5432/postgres
+sql: |
+  -- Example placeholder for a PLV8-backed implementation
+  SELECT jd_diff($1::jsonb, $2::jsonb)

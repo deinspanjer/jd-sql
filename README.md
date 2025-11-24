@@ -56,10 +56,10 @@ Check the doc folder for your implementation for details.
 This repository includes the upstream josephburnett/jd project as a Git submodule under external/jd. We use it primarily to view upstream code and run/port spec tests.
 
 - Location: external/jd (spec cases in external/jd/spec/test)
-- First-time setup: make jd-submodule-init
-- Update to latest upstream on the current submodule branch: make jd-submodule-update
-- Checkout a specific tag/branch/commit: make jd-spec-pull REF=v2.2.0
-- Run upstream jd spec tests against jd-sql: make jd-spec-test
+- First-time setup: task jd-submodule-init
+- Update to latest upstream on the current submodule branch: task jd-submodule-update
+- Checkout a specific tag/branch/commit: task jd-spec-pull -- REF=v2.2.0
+- Run upstream jd spec tests against jd-sql: task jd-spec-test
 
 #### jd-sql Rust test harness
 
@@ -88,8 +88,8 @@ To run the test suite against jd-sql (PostgreSQL):
 1) Build and run a dev Postgres with jd-sql installed
 
 ```
-make docker-pg-build
-make docker-pg-run
+task docker-pg-build
+task docker-pg-run
 # Once running, in another terminal install the SQL functions:
 psql -h localhost -U postgres -f sql/postgres/jd_pg_plpgsql.sql
 ```
@@ -104,11 +104,33 @@ cp tools/jd-sql-spec-runner/jd-sql-spec.example.yaml tools/jd-sql-spec-runner/jd
 3) Execute the upstream spec tests via the wrapper
 
 ```
-make jd-spec-test
+task jd-spec-test
 ```
 
 Notes:
 - The wrapper currently supports Postgres only.
+
+### Task-based workflow
+
+- Install Task: https://taskfile.dev/installation/
+- List tasks: `task -l`
+- Common tasks:
+  - Build vanilla Postgres image: `task docker-pg-build`
+  - Run Postgres dev container: `task docker-pg-run`
+  - Install SQL functions: `task pg-install`
+  - Smoke tests: `task pg-smoke`
+  - Build spec runner: `task jd-spec-build-runner`
+  - Run jd spec tests: `task jd-spec-test`
+
+File watcher for SQL (Postgres):
+
+- Start the watcher: `task --watch dev:watch-sql`
+- It will:
+  - Detect which engine the changed file targets (plpgsql vs plv8 by filename)
+  - Ensure the appropriate Postgres container is running
+  - Apply the changed SQL file via psql
+  - Build the Rust jd-sql-spec-runner and the upstream Go test-runner for your host
+  - Run the jd spec test suite with the correct config
 - The provided SQL example returns JSONB (from jd_diff); the wrapper will print compact JSON if the first column is JSON/JSONB, or print text verbatim if it’s TEXT. Mapping to the exact jd structural diff text format will come as jd-sql evolves.
  - Config discovery: You can omit -c/--config. The runner will look for jd-sql-spec.yaml in (1) the current working directory, then (2) the same directory as the runner executable. Use -c to override explicitly.
  - Exit codes: The spec runner expects exit code 1 when a diff is produced and 0 when no diff is produced. The jd-sql runner follows this: it exits 1 if the SQL result indicates a non-empty diff (non-empty TEXT or non-empty JSON/JSONB), exits 0 if the result is empty (empty string, null, [] or {}). Any runner error (invalid inputs, DB/connect/SQL failures, unsupported result type) exits with code 2.
@@ -118,7 +140,7 @@ Notes:
 
 - We include initial SQL tests in spec/test/sql for use with JerrySievert/equinox.
 - These tests can also be run manually for quick verification.
-- To run the tests, run `make test` in the root directory.
+- To run the tests, run `task test` in the root directory.
 
 # Usage documentation copied from `jd` project
 The following documentation is almost identical to the original jd project.

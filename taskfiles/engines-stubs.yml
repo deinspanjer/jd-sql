@@ -1,0 +1,27 @@
+version: '3'
+
+tasks:
+  duckdb:info:
+    desc: DuckDB support is planned. No tasks yet.
+    cmds:
+      - echo "DuckDB engine tasks not yet implemented."
+
+  databricks:info:
+    desc: Databricks support is planned. No tasks yet.
+    cmds:
+      - echo "Databricks engine tasks not yet implemented."
+
+  mysql:info:
+    desc: MySQL support is planned. No tasks yet.
+    cmds:
+      - echo "MySQL engine tasks not yet implemented."
+
+  sqlserver:info:
+    desc: SQL Server support is planned. No tasks yet.
+    cmds:
+      - echo "SQL Server engine tasks not yet implemented."
+
+  sqlite:info:
+    desc: SQLite support is planned. No tasks yet.
+    cmds:
+      - echo "SQLite engine tasks not yet implemented."
