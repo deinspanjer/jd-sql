@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="Task: test" type="TaskRunConfiguration" factoryName="TaskRunConfiguration">
+  <configuration default="false" name="run spec test" type="TaskRunConfiguration" factoryName="TaskRunConfiguration">
     <taskfile taskPath="" filename="$PROJECT_DIR$/Taskfile.yml" task="test" workingDirectory="" arguments="" pty="false">
       <envs />
       <vars />

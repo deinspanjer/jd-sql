@@ -8,10 +8,8 @@
       <sourceFolder url="file://$MODULE_DIR$/external/jd/spec/test/cases" type="java-test-resource" />
       <sourceFolder url="file://$MODULE_DIR$/external/jd/spec/test/testdata" type="java-test-resource" />
       <sourceFolder url="file://$MODULE_DIR$/sql" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/tools/jd-sql-spec-runner" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/tools/jd-sql-spec-runner/configs" type="java-test-resource" />
-      <sourceFolder url="file://$MODULE_DIR$/tools/jd-sql-spec-runner/src" isTestSource="true" />
-      <excludeFolder url="file://$MODULE_DIR$/tools/jd-sql-spec-runner/target" />
+      <sourceFolder url="file://$MODULE_DIR$/test-src/jd-sql-spec-runner" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/test-src/testdata" type="java-test-resource" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

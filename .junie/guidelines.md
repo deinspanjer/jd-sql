@@ -4,6 +4,15 @@
 This project is a port of the Golang project josephburnett-jd spec into SQL functionality for various database engines.
 It is focused on a human-readable diff format but has the ability to read and produce other diff formats.
 
+## Junie permissions
+
+You are allowed to:
+- make changes to any file in the project
+- run any `task` target
+- run commands such as `go mod download` that retrieve files from the internet
+- run commands that interact with the locally running Docker containers related to the project
+
+
 ## Code Standards
 
 - When adding new functionality, new tests SHOULD be added and documentation MUST be updated
@@ -28,7 +37,9 @@ It is focused on a human-readable diff format but has the ability to read and pr
 - `/docker` - Dockerfiles for testing
 - `/examples` - Various examples of usage
 - `/sql` - SQL files for installing the function to a PostgreSQL database
-- `/tools/jd-sql-spec-runner` - Rust test harness and configs used to run upstream jd spec tests against jd-sql
+- `/test-src` - Go-based jd-sql-spec-runner sources (test harness)
+- `/test-src/testdata/jd-sql-spec-runner` - Test resources for the spec runner (configs, example YAML)
+- `/out/test/bin` - Built binaries for test runners (output of build tasks)
 
 ### Reference code for porting
 - `/external/jd/CLAUDE.md` - Guidelines provided by the original jd project for LLM assistance

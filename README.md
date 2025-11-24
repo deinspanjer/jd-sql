@@ -61,12 +61,13 @@ This repository includes the upstream josephburnett/jd project as a Git submodul
 - Checkout a specific tag/branch/commit: task jd-spec-pull -- REF=v2.2.0
 - Run upstream jd spec tests against jd-sql: task jd-spec-test
 
-#### jd-sql Rust test harness
+#### jd-sql Go test harness
 
-We provide a small Rust wrapper that lets the upstream spec runner call into a configured jd-sql SQL implementation.
+We provide a small Go wrapper that lets the upstream spec runner call into a configured jd-sql SQL implementation.
+The build task automatically fetches its Go modules (runs `go mod tidy` and `go mod download`) so you don't need to manage dependencies manually.
 
-- Location: tools/jd-sql-spec-runner
-- Config file: tools/jd-sql-spec-runner/jd-sql-spec.yaml (create by copying the provided example)
+- Source: test-src/jd-sql-spec-runner
+- Config file: test-src/testdata/jd-sql-spec-runner/jd-sql-spec.yaml (create by copying the provided example)
 
 Config example (YAML):
 
@@ -79,8 +80,8 @@ sql: |
 
 How it works:
 - The upstream Go test harness creates two temporary files containing the A and B JSON documents.
-- It invokes the Rust wrapper (the "binary under test"), passing through arguments and the two file paths.
-- The Rust wrapper reads the YAML config, connects to the configured database, executes the configured SQL with the two JSON inputs bound as parameters, and prints the result to stdout.
+- It invokes the Go wrapper (the "binary under test"), passing through arguments and the two file paths.
+- The wrapper reads the YAML config, connects to the configured database, executes the configured SQL with the two JSON inputs bound as parameters, and prints the result to stdout.
 - The Go harness compares stdout with the expected diff for each case.
 
 To run the test suite against jd-sql (PostgreSQL):
@@ -97,7 +98,7 @@ psql -h localhost -U postgres -f sql/postgres/jd_pg_plpgsql.sql
 2) Create the runner config
 
 ```
-cp tools/jd-sql-spec-runner/jd-sql-spec.example.yaml tools/jd-sql-spec-runner/jd-sql-spec.yaml
+cp test-src/testdata/jd-sql-spec-runner/jd-sql-spec.example.yaml test-src/testdata/jd-sql-spec-runner/jd-sql-spec.yaml
 # Adjust DSN if needed
 ```
 
@@ -129,7 +130,7 @@ File watcher for SQL (Postgres):
   - Detect which engine the changed file targets (plpgsql vs plv8 by filename)
   - Ensure the appropriate Postgres container is running
   - Apply the changed SQL file via psql
-  - Build the Rust jd-sql-spec-runner and the upstream Go test-runner for your host
+  - Build the Go jd-sql-spec-runner and the upstream Go test-runner for your host
   - Run the jd spec test suite with the correct config
 - The provided SQL example returns JSONB (from jd_diff); the wrapper will print compact JSON if the first column is JSON/JSONB, or print text verbatim if it’s TEXT. Mapping to the exact jd structural diff text format will come as jd-sql evolves.
  - Config discovery: You can omit -c/--config. The runner will look for jd-sql-spec.yaml in (1) the current working directory, then (2) the same directory as the runner executable. Use -c to override explicitly.

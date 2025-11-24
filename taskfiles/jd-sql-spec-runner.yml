@@ -2,13 +2,17 @@ version: '3'
 
 tasks:
   build-runner:
-    desc: Build the Rust jd-sql-spec-runner (release)
-    dir: tools/jd-sql-spec-runner
+    desc: Build the Go jd-sql-spec-runner (host)
+    dir: test-src
     cmds:
       - |
-        mkdir -p ../../out/test/bin
-        # Build Rust runner into the project compiler output dir
-        cargo install --target-dir ../../out --root ../../out/test --path .
+        echo "[jd-sql] Building Go jd-sql-spec-runner for $(go env GOOS)/$(go env GOARCH)"
+        mkdir -p ../out/test/bin
+        # Ensure Go modules are resolved for the runner
+        go mod tidy
+        go mod download
+        # Build Go runner into the project output dir
+        go build -o ../out/test/bin/jd-sql-spec-runner ./jd-sql-spec-runner
 
   build-upstream:
     desc: Build upstream Go spec test-runner for host arch (overrides any bundled binary)
@@ -18,12 +22,14 @@ tasks:
         echo "[jd-sql] Building upstream jd/spec/test runner for $(go env GOOS)/$(go env GOARCH)"
         # Build into the project compiler output dir to avoid dirtying external/jd
         mkdir -p ../../../../out/test/bin
+        # Ensure Go modules are available for the upstream runner
+        go mod download
         go build -o ../../../../out/test/bin/jd-upstream-test-runner .
 
   test:
     desc: Run upstream jd specifications via jd-sql-spec-runner (Postgres)
     vars:
-      CFG: '{{.CFG | default "tools/jd-sql-spec-runner/configs/postgres-plpgsql.yaml"}}'
+      CFG: '{{.CFG | default "test-src/testdata/jd-sql-spec-runner/configs/postgres-plpgsql.yaml"}}'
     cmds:
       - task: :pg:install-sql
       - task: build-runner

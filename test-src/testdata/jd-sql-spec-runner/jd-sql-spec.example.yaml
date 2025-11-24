@@ -4,7 +4,7 @@
 # Only postgres is supported at the moment
 engine: postgres
 
-# Default dev DSN matches the Makefile docker-pg-run container
+# Default dev DSN matches the Task docker pg container
 # user: postgres, password: postgres, db: postgres
 dsn: postgres://postgres:postgres@localhost:5432/postgres
 
