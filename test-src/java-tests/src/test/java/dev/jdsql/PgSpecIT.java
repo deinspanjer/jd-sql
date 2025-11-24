@@ -1,6 +1,5 @@
 package dev.jdsql;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.parallel.Execution;
@@ -15,11 +14,8 @@ import java.nio.file.Path;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -199,7 +195,7 @@ public class PgSpecIT {
         try {
             JSON.readTree(s);
             return false;
-        } catch (JsonProcessingException e) {
+        } catch (IOException e) {
             return true;
         }
     }

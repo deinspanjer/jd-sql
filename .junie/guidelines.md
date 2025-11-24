@@ -36,10 +36,18 @@ You are allowed to:
 - `/doc` - Plans and documents
 - `/docker` - Dockerfiles for testing
 - `/examples` - Various examples of usage
-- `/sql` - SQL files for installing the function to a PostgreSQL database
-- `/test-src` - Go-based jd-sql-spec-runner sources (test harness)
-- `/test-src/testdata/jd-sql-spec-runner` - Test resources for the spec runner (configs, example YAML)
-- `/out/test/bin` - Built binaries for test runners (output of build tasks)
+- `/sql` - Installable SQL script sources that are the primary outputs of this project (e.g., sql/postgres/*)
+- `/external/jd` - Upstream jd project (reference code and spec)
+- `/external/jd/spec/test` - Upstream spec runner tests (treated as Test Resources in the IDE via Gradle)
+- `/test-src/jd-sql-spec-runner` - Go wrapper used by upstream spec runner to call jd-sql
+- `/test-src/testdata/jd-sql-spec-runner` - Configs and test data for the Go wrapper
+- `/test-src/java-tests` - JUnit integration tests (Gradle subproject)
+  - `src/test/java` - Java test sources
+  - `src/test/resources` - Project-specific test resources
+  - Additional Test Resources (declared via Gradle `sourceSets`):
+    - `external/jd/spec/test`
+    - `test-src/testdata`
+- `/out` - Build outputs (Gradle is configured to place outputs under out/gradle/**)
 
 ### Reference code for porting
 - `/external/jd/CLAUDE.md` - Guidelines provided by the original jd project for LLM assistance
@@ -57,3 +65,9 @@ You are allowed to:
 - Don't use words like "comprehensive" or "robust" because they don't add anything to the specificity of
   a sentence. Each layer of testing adds a layer of probability to catch a bug, but few things are truly
   comprehensive. And robustness again is very relative and requires context, such as SLAs.
+
+## IntelliJ and Gradle
+
+- IntelliJ derives source and resource roots from Gradle. Avoid manually marking directories in Project Structure; Gradle refresh will overwrite.
+- The `test-src/java-tests` subproject configures extra Test Resources via `sourceSets` so that:
+  - `external/jd/spec/test` and `test-src/testdata` appear as Test Resources in the IDE and are on the test runtime classpath.

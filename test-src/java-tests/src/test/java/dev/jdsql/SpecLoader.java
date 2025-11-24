@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 
 public class SpecLoader {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -28,10 +29,12 @@ public class SpecLoader {
         if (!Files.isDirectory(casesDir)) {
             throw new IOException("Cases directory not found: " + casesDir);
         }
-        List<Path> files = Files.list(casesDir)
-                .filter(p -> p.getFileName().toString().endsWith(".json"))
-                .sorted()
-                .toList();
+        List<Path> files;
+        try (Stream<Path> s = Files.list(casesDir)) {
+            files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
+                    .sorted()
+                    .toList();
+        }
         List<SpecCase> out = new ArrayList<>();
         for (Path f : files) {
             List<SpecCase> batch = MAPPER.readValue(f.toFile(), new TypeReference<>() {
@@ -45,10 +48,12 @@ public class SpecLoader {
         // Allow project-specific cases under test-src/java-tests resources folder (optional)
         Path customDir = projectRoot().resolve("test-src/java-tests/src/test/resources/jd-sql/cases");
         if (!Files.exists(customDir)) return List.of();
-        List<Path> files = Files.list(customDir)
-                .filter(p -> p.getFileName().toString().endsWith(".json"))
-                .sorted()
-                .toList();
+        List<Path> files;
+        try (Stream<Path> s = Files.list(customDir)) {
+            files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
+                    .sorted()
+                    .toList();
+        }
         List<SpecCase> out = new ArrayList<>();
         for (Path f : files) {
             List<SpecCase> batch = MAPPER.readValue(f.toFile(), new TypeReference<>() {
@@ -62,9 +67,10 @@ public class SpecLoader {
         Path sqlDir = projectRoot().resolve("sql");
         if (!Files.isDirectory(sqlDir)) return List.of();
         List<Path> out = new ArrayList<>();
-        Files.walk(sqlDir)
-                .filter(p -> p.getFileName().toString().endsWith(".sql"))
-                .forEach(out::add);
+        try (Stream<Path> s = Files.walk(sqlDir)) {
+            s.filter(p -> p.getFileName().toString().endsWith(".sql"))
+             .forEach(out::add);
+        }
         return out;
     }
 

@@ -23,6 +23,29 @@ dependencies {
 
     // JSON parsing
     testImplementation("com.fasterxml.jackson.core:jackson-databind:2.18.0")
+
+    // Silence SLF4J "no provider" warnings in tests and provide simple logging.
+    // Use testImplementation (not only testRuntimeOnly) so IntelliJ's JUnit runner,
+    // when using the IDE classpath instead of Gradle, still includes the binding.
+    testImplementation("org.slf4j:slf4j-simple:2.0.16")
+}
+
+// Ensure IntelliJ (via Gradle import) marks upstream spec data and local testdata
+// as Test Resources for this module. This way they appear under the module as
+// "Test Resources" and are on the test runtime classpath in both Gradle and IDE runs.
+sourceSets {
+    val test by getting {
+        resources {
+            // Upstream jd spec runner resources (JSON cases, YAML, etc.)
+            srcDir(rootProject.file("external/jd/spec/test"))
+
+            // Project-provided spec runner configs and testdata
+            srcDir(rootProject.file("test-src/testdata"))
+        }
+        // Note: If additional non-standard Java/Kotlin test sources are added in the
+        // repository outside of this subproject, declare them here with:
+        // java.srcDir(rootProject.file("path/to/extra/test/src"))
+    }
 }
 
 tasks.test {

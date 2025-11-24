@@ -51,13 +51,34 @@ TODO: add installation instructions for each implementation
 We provide a Docker-based development environment for each supported implementation.
 Check the doc folder for your implementation for details.
 
+### Project layout and IntelliJ/Gradle mapping
+
+Key parts of this repository and how IntelliJ (via Gradle import) categorizes them:
+
+- sql/* — installable SQL scripts that are the primary outputs of this project.
+- README.md, doc/*, examples/* — documentation and examples.
+- external/jd — upstream jd project used as a reference and for spec tests.
+- external/jd/spec/test — upstream spec runner “black box” tests; imported into the IDE as Test Resources for the Java tests via Gradle sourceSets.
+- test-src/jd-sql-spec-runner and test-src/testdata/jd-sql-spec-runner — Go wrapper and config so the upstream spec runner can exercise jd-sql.
+- test-src/java-tests — JUnit-based integration tests for jd-sql; Gradle subproject.
+
+IntelliJ notes:
+
+- IntelliJ derives source/resource roots from Gradle. Do not mark folders manually in Project Structure — Gradle refresh will overwrite.
+- The Gradle subproject under test-src/java-tests declares extra Test Resources so the IDE shows them correctly:
+  - external/jd/spec/test (upstream spec cases)
+  - test-src/testdata (local test data and configs)
+
 ### Java integration tests (JUnit + Testcontainers)
 
 Java-based integration tests for jd-sql now live under `test-src/java-tests` as a Gradle subproject.
 
 - Location: `test-src/java-tests`
 - Test sources: `test-src/java-tests/src/test/java`
-- Test resources (optional project-specific cases): `test-src/java-tests/src/test/resources`
+- Test resources (project-specific): `test-src/java-tests/src/test/resources`
+- Additional Test Resources (configured via Gradle):
+  - `external/jd/spec/test`
+  - `test-src/testdata`
 - Run tests: `task test` (or `./gradlew :test-src:java-tests:test`)
 - Watch SQL and re-run tests on change: `task --watch dev:watch-sql` (includes Java tests via `java:watch-sql`)
 
@@ -69,7 +90,7 @@ Notes:
 
 This repository includes the upstream josephburnett/jd project as a Git submodule under external/jd. We use it primarily to view upstream code and run/port spec tests.
 
-- Location: external/jd (spec cases in external/jd/spec/test)
+- Location: external/jd (spec cases in external/jd/spec/test). IntelliJ imports `external/jd/spec/test` as Test Resources for the Java tests.
 - First-time setup: task jd-submodule-init
 - Update to latest upstream on the current submodule branch: task jd-submodule-update
 - Checkout a specific tag/branch/commit: task jd-spec-pull -- REF=v2.2.0

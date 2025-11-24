@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="PgSpecIT" type="JUnit" factoryName="JUnit" nameIsGenerated="true">
+  <configuration default="false" name="IntelliJ java test" type="JUnit" factoryName="JUnit">
     <module name="jd-sql.test-src.java-tests.test" />
     <extension name="software.aws.toolkits.jetbrains.core.execution.JavaAwsConnectionExtension">
       <option name="credential" />
