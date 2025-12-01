@@ -15,4 +15,4 @@ dsn: postgres://postgres:postgres@localhost:5432/postgres
 # For the current jd_pg_plpgsql.sql functions, jd_diff returns JSONB ops. You can
 # convert to text if you have a renderer; otherwise the runner will print compact JSON.
 sql: |
-  SELECT jd_diff($1::jsonb, $2::jsonb)
+  SELECT jd_diff($1::jsonb, $2::jsonb, NULL::jsonb)

@@ -1,0 +1,11 @@
+[
+  {
+    "name": "sql_custom_simple_replace",
+    "description": "Basic jd-sql specific case placeholder: replace a scalar value",
+    "category": "jd-sql-custom",
+    "content_a": "{\"a\":1}",
+    "content_b": "{\"a\":2}",
+    "expected_diff": "[{\"op\":\"replace\",\"path\":[\"a\"],\"value\":2]",
+    "expected_exit": 1
+  }
+]

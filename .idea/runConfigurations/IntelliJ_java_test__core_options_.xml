@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="IntelliJ java test" type="JUnit" factoryName="JUnit">
+  <configuration default="false" name="IntelliJ java test (core,options)" type="JUnit" factoryName="JUnit">
     <module name="jd-sql.test-src.java-tests.test" />
     <extension name="software.aws.toolkits.jetbrains.core.execution.JavaAwsConnectionExtension">
       <option name="credential" />
@@ -10,6 +10,9 @@
     <option name="MAIN_CLASS_NAME" value="dev.jdsql.PgSpecIT" />
     <option name="METHOD_NAME" value="" />
     <option name="TEST_OBJECT" value="class" />
+    <envs>
+      <env name="JDSQL_SPEC_CATEGORIES" value="jd-core,jd-options" />
+    </envs>
     <method v="2">
       <option name="Make" enabled="true" />
     </method>

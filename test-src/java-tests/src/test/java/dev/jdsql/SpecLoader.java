@@ -45,20 +45,29 @@ public class SpecLoader {
     }
 
     public static List<SpecCase> loadProjectCases() throws IOException {
-        // Allow project-specific cases under test-src/java-tests resources folder (optional)
-        Path customDir = projectRoot().resolve("test-src/java-tests/src/test/resources/jd-sql/cases");
-        if (!Files.exists(customDir)) return List.of();
-        List<Path> files;
-        try (Stream<Path> s = Files.list(customDir)) {
-            files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
-                    .sorted()
-                    .toList();
-        }
+        // Allow project-specific cases in either location (both optional):
+        // 1) test resources under the java-tests subproject
+        // 2) shared testdata area used by multiple runners
+        Path casesDirA = projectRoot().resolve("test-src/java-tests/src/test/resources/jd-sql/cases");
+        Path casesDirB = projectRoot().resolve("test-src/testdata/cases");
+        List<Path> roots = new ArrayList<>();
+        if (Files.isDirectory(casesDirA)) roots.add(casesDirA);
+        if (Files.isDirectory(casesDirB)) roots.add(casesDirB);
+        if (roots.isEmpty()) return List.of();
+
         List<SpecCase> out = new ArrayList<>();
-        for (Path f : files) {
-            List<SpecCase> batch = MAPPER.readValue(f.toFile(), new TypeReference<>() {
-            });
-            out.addAll(batch);
+        for (Path root : roots) {
+            List<Path> files;
+            try (Stream<Path> s = Files.list(root)) {
+                files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
+                        .sorted()
+                        .toList();
+            }
+            for (Path f : files) {
+                List<SpecCase> batch = MAPPER.readValue(f.toFile(), new TypeReference<>() {
+                });
+                out.addAll(batch);
+            }
         }
         return out;
     }

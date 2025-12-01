@@ -25,7 +25,7 @@ public class PgSpecIT {
 
     private static List<Path> pgSqlFiles;
     private static List<SpecCase> allCases;
-    private static String level;
+    private static java.util.Set<String> categories;
     private static final ObjectMapper JSON = new ObjectMapper();
     // We manage one container per SQL install file to balance isolation and performance
     private static final java.util.Map<Path, PostgreSQLContainer<?>> containers = new java.util.concurrent.ConcurrentHashMap<>();
@@ -37,20 +37,48 @@ public class PgSpecIT {
                 .filter(p -> p.toString().contains("/postgres/"))
                 .sorted()
                 .collect(Collectors.toList());
-        level = System.getProperty("jdsql.spec.level", System.getenv().getOrDefault("JDSQL_SPEC_LEVEL", "core"));
+        String catStr = System.getProperty("jdsql.spec.categories",
+                System.getenv().getOrDefault("JDSQL_SPEC_CATEGORIES", "")).trim();
+        categories = java.util.Arrays.stream(catStr.isEmpty() ? new String[]{} : catStr.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(String::toLowerCase)
+                .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
         List<SpecCase> upstream = SpecLoader.loadUpstreamCases();
         List<SpecCase> project = SpecLoader.loadProjectCases();
         allCases = new ArrayList<>();
-        allCases.addAll(filterByLevel(upstream));
-        allCases.addAll(filterByLevel(project));
+        allCases.addAll(filterByCategories(upstream));
+        allCases.addAll(filterByCategories(project));
     }
 
-    private static List<SpecCase> filterByLevel(List<SpecCase> in) {
-        if (level.equalsIgnoreCase("all")) return in;
-        // default: only core cases
+    private static List<SpecCase> filterByCategories(List<SpecCase> in) {
+        if (categories.isEmpty()) return in; // default: run all categories when not specified
         return in.stream()
-                .filter(c -> c.compliance_level == null || c.compliance_level.equalsIgnoreCase("core"))
+                .filter(c -> categories.contains(normalizeCategory(c)))
                 .collect(Collectors.toList());
+    }
+
+    private static String normalizeCategory(SpecCase c) {
+        String cat = c.category == null ? "" : c.category.toLowerCase();
+        switch (cat) {
+            case "core":
+                return "jd-core";
+            case "options":
+                return "jd-options";
+            case "path_options":
+                return "jd-path_options";
+            case "format":
+            case "translation":
+            case "patching":
+                return "jd-format";
+            case "errors":
+                return "jd-errors";
+            case "edge_cases":
+                return "jd-edge_cases";
+            default:
+                // Pass-through for already prefixed categories like jd-sql-custom, etc.
+                return cat;
+        }
     }
 
     @TestFactory
@@ -88,7 +116,7 @@ public class PgSpecIT {
         }));
 
         for (SpecCase c : cases) {
-            String displayName = sqlFile.getFileName() + " :: " + c.category + "/" + c.name;
+            String displayName = sqlFile.getFileName() + " :: " + normalizeCategory(c) + "/" + c.name;
             tests.add(DynamicTest.dynamicTest(displayName, () -> {
                 PostgreSQLContainer<?> pg = containers.get(sqlFile);
                 assertNotNull(pg, "Container not started for " + sqlFile);
@@ -96,23 +124,24 @@ public class PgSpecIT {
                 try (Connection conn = DriverManager.getConnection(url, pg.getUsername(), pg.getPassword())) {
                     conn.setAutoCommit(true);
 
-                    // sanity: jd_diff exists
-                    assertTrue(functionExists(conn, "jd_diff", 2), "jd_diff(a jsonb, b jsonb) must exist");
+                    // sanity: jd_diff exists with options parameter
+                    assertTrue(functionExists(conn, "jd_diff", 3), "jd_diff(a jsonb, b jsonb, options jsonb) must exist");
 
                     String a = SpecLoader.normalizeContentForJsonb(c.content_a);
                     String b = SpecLoader.normalizeContentForJsonb(c.content_b);
+                    String options = buildOptionsJson(c);
                     if (Boolean.TRUE.equals(c.should_error)) {
                         boolean aInvalid = isInvalidJson(a);
                         boolean bInvalid = isInvalidJson(b);
                         if (aInvalid || bInvalid) {
-                            assertThrows(SQLException.class, () -> callJdDiff(conn, a, b),
+                            assertThrows(SQLException.class, () -> callJdDiff(conn, a, b, options),
                                     () -> "Expected SQL error for case " + c.name);
                             return;
                         }
                         // CLI-only error case (e.g., too many args, nonexistent file). For SQL, just ensure call succeeds.
-                        assertDoesNotThrow(() -> callJdDiff(conn, a, b), () -> "SQL should not error for CLI-only case " + c.name);
+                        assertDoesNotThrow(() -> callJdDiff(conn, a, b, options), () -> "SQL should not error for CLI-only case " + c.name);
                     } else {
-                        String diff = callJdDiff(conn, a, b);
+                        String diff = callJdDiff(conn, a, b, options);
                         if (c.expected_exit == 0) {
                             assertEquals("", diff, "Expected no differences");
                         } else {
@@ -174,17 +203,45 @@ public class PgSpecIT {
         }
     }
 
-    private static String callJdDiff(Connection conn, String a, String b) throws SQLException {
-        String sql = "select jd_diff(?::jsonb, ?::jsonb)";
+    private static String callJdDiff(Connection conn, String a, String b, String optionsJson) throws SQLException {
+        String sql = "select jd_diff(?::jsonb, ?::jsonb, ?::jsonb)";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
             if (b == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, b);
+            if (optionsJson == null) ps.setNull(3, java.sql.Types.VARCHAR); else ps.setString(3, optionsJson);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 String res = rs.getString(1);
                 return res == null ? "" : res;
             }
         }
+    }
+
+    private static String buildOptionsJson(SpecCase c) {
+        if (c.args == null || c.args.isEmpty()) return null;
+        // If -opts=JSON is present, pass it through as-is
+        for (String arg : c.args) {
+            if (arg != null && arg.startsWith("-opts=")) {
+                String json = arg.substring("-opts=".length());
+                // Validate JSON is an array; if invalid, ignore for SQL runner
+                try {
+                    com.fasterxml.jackson.databind.JsonNode n = JSON.readTree(json);
+                    if (n != null && n.isArray()) return json;
+                } catch (IOException ignored) {
+                    // ignore invalid opts for SQL tests (CLI-only error)
+                }
+                return null;
+            }
+        }
+        // Map simple flags to options array (minimal: support -set for now)
+        boolean set = false;
+        for (String arg : c.args) {
+            if ("-set".equals(arg)) set = true;
+        }
+        if (set) {
+            return "[\"SET\"]";
+        }
+        return null;
     }
 
     private static boolean isInvalidJson(String s) {

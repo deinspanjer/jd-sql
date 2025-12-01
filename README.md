@@ -27,10 +27,10 @@ See the [examples/jsonb_diff_merge.sql](examples/postgres/jsonb_diff_merge.sql) 
 Quick example:
 
 ```
-SELECT jd_diff('{"a":1}'::jsonb, '{"a":2,"b":3}'::jsonb);
+SELECT jd_diff('{"a":1}'::jsonb, '{"a":2,"b":3}'::jsonb, NULL);
 -- => [{"op":"replace","path":["a"],"value":2},{"op":"add","path":["b"],"value":3}]
 
-SELECT jd_patch('{"a":1}'::jsonb, '[{"op":"replace","path":["a"],"value":2},{"op":"add","path":["b"],"value":3}]');
+SELECT jd_patch('{"a":1}'::jsonb, '[{"op":"replace","path":["a"],"value":2},{"op":"add","path":["b"],"value":3}]', NULL);
 -- => {"a":2,"b":3}
 ```
 
@@ -84,7 +84,28 @@ Java-based integration tests for jd-sql now live under `test-src/java-tests` as 
 
 Notes:
 - The tests use Testcontainers to start a disposable PostgreSQL and install the SQL from `sql/postgres/*.sql` before executing spec cases.
-- The test harness also runs the upstream jd CORE cases; you can add project-specific cases under `test-src/java-tests/src/test/resources/jd-sql/cases`.
+- The test harness runs upstream jd spec cases and any project-specific cases. You can add project-specific cases under either `test-src/java-tests/src/test/resources/jd-sql/cases` or the shared `test-src/testdata/cases`.
+
+Filtering by categories:
+- You can run only specific categories of spec cases by setting a comma-separated list with either:
+  - JVM system property: `-Djdsql.spec.categories=jd-core,jd-format`
+  - Environment variable: `JDSQL_SPEC_CATEGORIES=jd-core,jd-format`
+- If no categories are provided, all cases are executed by default.
+- Available categories mapped for upstream specs:
+  - `jd-core` (upstream `core`)
+  - `jd-options` (upstream `options`)
+  - `jd-path_options` (upstream `path_options`)
+  - `jd-format` (upstream `format`, `translation`, and `patching`)
+  - `jd-errors` (upstream `errors`)
+  - `jd-edge_cases` (upstream `edge_cases`)
+- Project-specific categories (jd-sql):
+  - `jd-sql-custom`
+
+Examples:
+```
+./gradlew :test-src:java-tests:test -Djdsql.spec.categories=jd-core
+JDSQL_SPEC_CATEGORIES=jd-core,jd-format ./gradlew :test-src:java-tests:test
+```
 
 ### Upstream jd submodule and spec tests
 
@@ -110,7 +131,7 @@ Config example (YAML):
 engine: postgres
 dsn: postgres://postgres:postgres@localhost:5432/postgres
 sql: |
-  SELECT jd_diff($1::jsonb, $2::jsonb)
+  SELECT jd_diff($1::jsonb, $2::jsonb, NULL::jsonb)
 ```
 
 How it works:
@@ -172,11 +193,11 @@ File watcher for SQL (Postgres):
  - Exit codes: The spec runner expects exit code 1 when a diff is produced and 0 when no diff is produced. The jd-sql runner follows this: it exits 1 if the SQL result indicates a non-empty diff (non-empty TEXT or non-empty JSON/JSONB), exits 0 if the result is empty (empty string, null, [] or {}). Any runner error (invalid inputs, DB/connect/SQL failures, unsupported result type) exits with code 2.
 
 
-## Testing with Equinox
+## Testing
 
-- We include initial SQL tests in spec/test/sql for use with JerrySievert/equinox.
-- These tests can also be run manually for quick verification.
+- We include a JUnit test suite that exercises the SQL functions using the data from the upstream jd spec test suite.
 - To run the tests, run `task test` in the root directory.
+- The upstream jd spec test can also be used to drive the SQL functions via a Go test harness. See the section above for details.
 
 # Usage documentation copied from `jd` project
 The following documentation is almost identical to the original jd project.
@@ -214,46 +235,49 @@ PathOptions allow you to apply different comparison semantics to specific paths 
 - `"DIFF_ON"`: Enable diffing at this path (default behavior)
 - `"DIFF_OFF"`: Disable diffing at this path, ignore all changes
 
+Note on options parameter:
+- All jd-sql functions accept an `options JSONB` parameter to control comparison behavior using jd V2-style options. Pass `NULL` for default behavior when you do not need options.
+
 **Examples:**
 
 Treat specific array as a set while others remain as lists:
 ```sql
-select jd_diff(left, right, opts :='[{"@":["tags"],"^":["SET"]}]')
+select jd_diff(left, right, '[{"@":["tags"],"^":["SET"]}]'::jsonb)
 ```
 
 Apply precision to specific temperature field:
 ```sql
-select jd_diff(left, right, opts :='[{"@":["sensor","temperature"],"^":[{"precision":0.1}]}]')
+select jd_diff(left, right, '[{"@":["sensor","temperature"],"^":[{"precision":0.1}]}]'::jsonb)
 ```
 
 Multiple PathOptions - SET on one path, precision on another:
 ```sql
-select jd_diff(left, right, opts :='[{"@":["items"],"^":["SET"]}, {"@":["price"],"^":[{"precision":0.01}]}]')
+select jd_diff(left, right, '[{"@":["items"],"^":["SET"]}, {"@":["price"],"^":[{"precision":0.01}]}]'::jsonb)
 ```
 
 Target specific array index:
 ```sql
-select jd_diff(left, right, opts :='[{"@":["measurements", 0],"^":[{"precision":0.05}]}]')
+select jd_diff(left, right, '[{"@":["measurements", 0],"^":[{"precision":0.05}]}]'::jsonb)
 ```
 
 Apply to root level:
 ```sql
-select jd_diff(left, right, opts :='[{"@":[],"^":["SET"]}]')
+select jd_diff(left, right, '[{"@":[],"^":["SET"]}]'::jsonb)
 ```
 
 Ignore specific fields (deny-list approach):
 ```sql
-select jd_diff(left, right, opts :='[{"@":["timestamp"],"^":["DIFF_OFF"]}, {"@":["metadata","generated"],"^":["DIFF_OFF"]}]')
+select jd_diff(left, right, '[{"@":["timestamp"],"^":["DIFF_OFF"]}, {"@":["metadata","generated"],"^":["DIFF_OFF"]}]'::jsonb)
 ```
 
 Allow-list approach - ignore everything except specific fields:
 ```sql
-select jd_diff(left, right, opts :='[{"@":[],"^":["DIFF_OFF"]}, {"@":["userdata"],"^":["DIFF_ON"]}]')
+select jd_diff(left, right, '[{"@":[],"^":["DIFF_OFF"]}, {"@":["userdata"],"^":["DIFF_ON"]}]'::jsonb)
 ```
 
 Nested override - ignore parent but include specific child:
 ```sql
-select jd_diff(left, right, opts :='[{"@":["config"],"^":["DIFF_OFF"]}, {"@":["config","user_settings"],"^":["DIFF_ON"]}]')
+select jd_diff(left, right, '[{"@":["config"],"^":["DIFF_OFF"]}, {"@":["config","user_settings"],"^":["DIFF_ON"]}]'::jsonb)
 ```
 
 

@@ -71,10 +71,10 @@ tasks:
     cmds:
       - |
         PGPASSWORD=${PGPASSWORD:-postgres} psql -X -v ON_ERROR_STOP=1 -h ${PGHOST:-localhost} -p ${PGPORT:-5432} -U ${PGUSER:-postgres} -d ${PGDATABASE:-postgres} -c \
-          "SELECT jd_diff('{\"a\":1}'::jsonb, '{\"a\":2}'::jsonb) AS simple_object_value_change;"
+          "SELECT jd_diff('{\"a\":1}'::jsonb, '{\"a\":2}'::jsonb, NULL::jsonb) AS simple_object_value_change;"
       - |
         PGPASSWORD=${PGPASSWORD:-postgres} psql -X -v ON_ERROR_STOP=1 -h ${PGHOST:-localhost} -p ${PGPORT:-5432} -U ${PGUSER:-postgres} -d ${PGDATABASE:-postgres} -c \
-          "SELECT jd_diff('{\"foo\":[\"bar\",\"baz\"]}'::jsonb, '{\"foo\":[\"bar\",\"boom\"]}'::jsonb) AS array_element_change;"
+          "SELECT jd_diff('{\"foo\":[\"bar\",\"baz\"]}'::jsonb, '{\"foo\":[\"bar\",\"boom\"]}'::jsonb, NULL::jsonb) AS array_element_change;"
       - |
         PGPASSWORD=${PGPASSWORD:-postgres} psql -X -v ON_ERROR_STOP=1 -h ${PGHOST:-localhost} -p ${PGPORT:-5432} -U ${PGUSER:-postgres} -d ${PGDATABASE:-postgres} -c \
-          "SELECT jd_diff('null'::jsonb, '{\"a\":1}'::jsonb) AS null_to_object;"
+          "SELECT jd_diff('null'::jsonb, '{\"a\":1}'::jsonb, NULL::jsonb) AS null_to_object;"
