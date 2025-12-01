@@ -28,6 +28,16 @@ You are allowed to:
 
   * Unless otherwise instructed
 
+- Installable SQL scripts (files under `sql/**`) must declare the project license in a leading SQL comment header. Use MIT and reference the root `LICENSE` file, for example:
+
+  ```sql
+  -- License: MIT
+  -- This file is licensed under the MIT License. See the LICENSE file at
+  -- github.com/deinspanjer/jd-sql/LICENSE for full license text.
+  --
+  -- Copyright (c) 2025 Daniel Einspanjer
+  ```
+
 ## File Structure
 
 - `README.md` - Information about installation, usage and diff format

@@ -427,3 +427,11 @@ The path syntax directly corresponds to PathOption targeting:
 - Diff path `["scores",[{}]]` ↔ PathOption `{"@":["scores"],"^":["MULTISET"]}`
 
 This allows fine-grained control over how different parts of your data structures are compared and diffed.
+
+## Attribution
+
+This project ports the ideas and specification from the upstream jd project but is an original implementation in SQL.
+
+- Upstream project: josephburnett/jd — https://github.com/josephburnett/jd
+- License: MIT — see external/jd/LICENSE in this repository or the upstream link above.
+- Portions of documentation in this repository (including some content in `doc/` and excerpts near the end of this README) are adapted from the upstream jd project and remain © Joseph Burnett under the MIT License.

@@ -1,5 +1,12 @@
 -- jd_pg_plpgsql.sql
 --
+-- License: MIT
+-- This file is licensed under the MIT License. See the LICENSE file at
+-- github.com/deinspanjer/jd-sql/LICENSE for full license text.
+--
+-- Copyright (c) 2025 Daniel Einspanjer
+--
+--
 -- Pure PL/pgSQL helpers and entrypoints for jd-sql, a SQL-focused port inspired by
 -- the jd project (https://github.com/josephburnett/jd). This initial version
 -- focuses on top-level JSONB object diffs and patches using built-in PostgreSQL

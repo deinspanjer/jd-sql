@@ -1,0 +1,8 @@
+Third-Party Notices
+
+This project includes and adapts documentation from the jd project:
+- josephburnett/jd (https://github.com/josephburnett/jd)
+- License: MIT — see external/jd/LICENSE in this repository or the upstream link above.
+- Portions of documentation are © Joseph Burnett.
+
+The jd-sql codebase is © 2025 Daniel Einspanjer, licensed under the MIT License (see LICENSE).

@@ -1,5 +1,9 @@
 # Diffing On/Off Feature Implementation
 
+> Attribution: Portions of this document are adapted from the upstream jd project
+> (josephburnett/jd) and are provided under the MIT License. See external/jd/LICENSE
+> in this repository or the upstream project for the full license text. © Joseph Burnett.
+
 ## Overview
 This document describes the implementation of a feature that allows turning diffing on and off using PathOptions. When diffing is turned off, differences are ignored and no diff events are generated. When diffing is turned on, differences are produced as they normally would be. This feature enables selective ignoring of parts of a JSON/YAML document (e.g., system-generated values) or conversely allows selective inclusion of parts by turning off diffing at the root and then selectively turning it back on.
 
