@@ -30,10 +30,10 @@ func main() {
 }
 
 func run() (int, error) {
-	cfgPath, fileA, fileB, err := parseArgs()
-	if err != nil {
-		return 2, err
-	}
+    cfgPath, fileA, fileB, err := parseArgs()
+    if err != nil {
+        return 2, err
+    }
 
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
@@ -208,8 +208,14 @@ func existsFile(p string) bool {
 }
 
 func runPostgres(cfg Config, fileA, fileB string) (int, error) {
-	// Read inputs as raw JSON text. We intentionally pass raw JSON strings to Postgres
-	// and let the database perform JSONB parsing/validation via ::jsonb casts.
+    // TODO(jd-sql): Upstream extended spec includes a `yaml_mode` case using the `-yaml` flag
+    // and YAML inputs. This runner intentionally passes inputs directly to the SQL implementation
+    // without YAML->JSON preprocessing. As a result, `yaml_mode` will currently fail here.
+    // The Java JUnit harness skips YAML-mode cases by default; this Go runner does NOT.
+    // If/when YAML support is added (or a preprocessing mode is introduced), consider adding
+    // a configurable skip or conversion similar to the Java tests.
+    // Read inputs as raw JSON text. We intentionally pass raw JSON strings to Postgres
+    // and let the database perform JSONB parsing/validation via ::jsonb casts.
 	// This mirrors the behavior of the previous Rust runner and ensures that invalid
 	// JSON surfaces as a SQL error (exit 2) instead of being pre-validated here.
 	aText, err := os.ReadFile(fileA)

@@ -86,6 +86,15 @@ Notes:
 - The tests use Testcontainers to start a disposable PostgreSQL and install the SQL from `sql/postgres/*.sql` before executing spec cases.
 - The test harness runs upstream jd spec cases and any project-specific cases. You can add project-specific cases under either `test-src/java-tests/src/test/resources/jd-sql/cases` or the shared `test-src/testdata/cases`.
 
+YAML-mode handling:
+- Upstream extended specs include a case named `yaml_mode` which uses the `-yaml` CLI flag and supplies YAML inputs. The jd-sql SQL runner accepts only JSON/JSONB, and we do not plan to support YAML input/output at this time. As a result, the Java test harness will skip any spec case that includes the `-yaml` flag by default.
+- You can opt-in to attempt running YAML cases by setting one of these switches (skipping will be disabled):
+  - JVM system property: `-Djdsql.enable.yaml=true`
+  - Environment variable: `JDSQL_ENABLE_YAML=1` (or `true` / `yes`)
+  Note: enabling this will likely cause failures until YAML-to-JSON preprocessing or native YAML support is introduced.
+
+Important: The Go-based jd spec runner wrapper in `test-src/jd-sql-spec-runner` that integrates with the upstream blackbox tests does not implement this skip. It will still report a failure for the YAML case at present. TODO has been added in that code to track this.
+
 Filtering by categories:
 - You can run only specific categories of spec cases by setting a comma-separated list with either:
   - JVM system property: `-Djdsql.spec.categories=jd-core,jd-format`
