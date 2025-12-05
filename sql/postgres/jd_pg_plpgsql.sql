@@ -107,14 +107,23 @@ BEGIN
   ELSE
     -- Scalars: Render numbers without trailing .0 when integral; otherwise use jsonb::text
     IF t = 'number' THEN
-      -- Extract textual representation of the root numeric and cast to numeric once
-      num := (j#>>'{}')::numeric;
-      IF num = round(num, 0) THEN
-        -- Render integral numerics without fractional part using numeric::text directly
-        RETURN (round(num, 0))::numeric::text;
-      ELSE
-        RETURN j::text; -- preserve original compact JSON number
+      -- Render numeric in minimal JSON form: trim trailing zeros after decimal
+      -- Start from the textual representation to preserve exponent forms
+      out := j#>>'{}';
+      -- If it looks like a plain decimal (no exponent), trim trailing zeros and possible trailing dot
+      IF position('e' in lower(out)) = 0 AND position('E' in out) = 0 THEN
+        IF position('.' in out) > 0 THEN
+          -- Remove trailing zeros
+          WHILE right(out, 1) = '0' LOOP
+            out := left(out, length(out)-1);
+          END LOOP;
+          -- If a trailing dot remains, remove it
+          IF right(out, 1) = '.' THEN
+            out := left(out, length(out)-1);
+          END IF;
+        END IF;
       END IF;
+      RETURN out;
     ELSE
       -- For non-number scalars (string/boolean/null): Postgres jsonb::text is compact and correct
       RETURN j::text;
@@ -231,8 +240,8 @@ $$;
 COMMENT ON FUNCTION _jd_path_is_prefix(jsonb, jsonb) IS 'Internal helper: true if prefix jsonb array is a prefix of path array.';
 
 
-CREATE OR REPLACE FUNCTION _jd_apply_option_dir(dir jsonb, diffing_on boolean, eps numeric, set_mode boolean, setkeys jsonb)
-RETURNS TABLE(new_diffing_on boolean, new_eps numeric, new_set_mode boolean, new_setkeys jsonb)
+CREATE OR REPLACE FUNCTION _jd_apply_option_dir(dir jsonb, diffing_on boolean, eps numeric, set_mode boolean, setkeys jsonb, multiset_mode boolean, color_mode boolean)
+RETURNS TABLE(new_diffing_on boolean, new_eps numeric, new_set_mode boolean, new_setkeys jsonb, new_multiset boolean, new_color boolean)
 LANGUAGE plpgsql
 IMMUTABLE
 AS $$
@@ -244,6 +253,8 @@ DECLARE
   out_eps numeric := eps;
   out_set boolean := set_mode;
   out_setkeys jsonb := setkeys; -- jsonb array of strings or null
+  out_multiset boolean := multiset_mode;
+  out_color boolean := color_mode;
 BEGIN
   IF t = 'string' THEN
     IF dir#>>'{}' = 'DIFF_ON' THEN
@@ -252,6 +263,10 @@ BEGIN
       out_diffing_on := false;
     ELSIF dir#>>'{}' = 'SET' THEN
       out_set := true;
+    ELSIF dir#>>'{}' = 'MULTISET' THEN
+      out_multiset := true;
+    ELSIF dir#>>'{}' = 'COLOR' THEN
+      out_color := true;
     END IF;
   ELSIF t = 'object' THEN
     IF dir ? 'precision' THEN
@@ -264,11 +279,11 @@ BEGIN
       END IF;
     END IF;
   END IF;
-  RETURN QUERY SELECT out_diffing_on, out_eps, out_set, out_setkeys;
+  RETURN QUERY SELECT out_diffing_on, out_eps, out_set, out_setkeys, out_multiset, out_color;
 END;
 $$;
 
-COMMENT ON FUNCTION _jd_apply_option_dir(jsonb, boolean, numeric, boolean, jsonb) IS 'Internal helper: applies a single option directive to state and returns updated values (including set mode and setkeys).';
+COMMENT ON FUNCTION _jd_apply_option_dir(jsonb, boolean, numeric, boolean, jsonb, boolean, boolean) IS 'Internal helper: applies a single option directive to state and returns updated values (including set/setkeys, multiset, and color).';
 
 
 -- Compute effective options state (diffingOn, precision) at a given path
@@ -282,13 +297,15 @@ DECLARE
   precision numeric := 1e-15;  -- default epsilon
   set_mode boolean := false;    -- default normal array (not set)
   setkeys jsonb := NULL;        -- default no setkeys
+  multiset_mode boolean := false; -- default normal array (no multiset)
+  color_mode boolean := false;    -- default no color
   elem jsonb;
   t text;
   dirs jsonb;
   d jsonb;
 BEGIN
   IF options IS NULL OR jsonb_typeof(options) <> 'array' THEN
-    RETURN jsonb_build_object('diffingOn', diffing_on, 'precision', precision, 'set', set_mode, 'setkeys', setkeys);
+    RETURN jsonb_build_object('diffingOn', diffing_on, 'precision', precision, 'set', set_mode, 'setkeys', setkeys, 'multiset', multiset_mode, 'color', color_mode);
   END IF;
 
   FOR elem IN SELECT e FROM jsonb_array_elements(options) AS z(e)
@@ -300,22 +317,22 @@ BEGIN
         dirs := elem->'^';
         IF jsonb_typeof(dirs) = 'array' THEN
           FOR d IN SELECT e FROM jsonb_array_elements(dirs) AS y(e) LOOP
-            SELECT new_diffing_on, new_eps, new_set_mode, new_setkeys INTO diffing_on, precision, set_mode, setkeys
-            FROM _jd_apply_option_dir(d, diffing_on, precision, set_mode, setkeys);
+            SELECT new_diffing_on, new_eps, new_set_mode, new_setkeys, new_multiset, new_color INTO diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode
+            FROM _jd_apply_option_dir(d, diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode);
           END LOOP;
         ELSE
-          SELECT new_diffing_on, new_eps, new_set_mode, new_setkeys INTO diffing_on, precision, set_mode, setkeys
-          FROM _jd_apply_option_dir(dirs, diffing_on, precision, set_mode, setkeys);
+          SELECT new_diffing_on, new_eps, new_set_mode, new_setkeys, new_multiset, new_color INTO diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode
+          FROM _jd_apply_option_dir(dirs, diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode);
         END IF;
       END IF;
     ELSE
       -- Global option applied everywhere (treat element itself as a directive)
-      SELECT new_diffing_on, new_eps, new_set_mode, new_setkeys INTO diffing_on, precision, set_mode, setkeys
-      FROM _jd_apply_option_dir(elem, diffing_on, precision, set_mode, setkeys);
+      SELECT new_diffing_on, new_eps, new_set_mode, new_setkeys, new_multiset, new_color INTO diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode
+      FROM _jd_apply_option_dir(elem, diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode);
     END IF;
   END LOOP;
 
-  RETURN jsonb_build_object('diffingOn', diffing_on, 'precision', precision, 'set', set_mode, 'setkeys', setkeys);
+  RETURN jsonb_build_object('diffingOn', diffing_on, 'precision', precision, 'set', set_mode, 'setkeys', setkeys, 'multiset', multiset_mode, 'color', color_mode);
 END;
 $$;
 
@@ -393,11 +410,79 @@ DECLARE
   st jsonb := _jd_options_state(options, path);
   set_mode boolean := COALESCE((st->>'set')::boolean, false);
   setkeys jsonb := st->'setkeys';
+  multiset_mode boolean := COALESCE((st->>'multiset')::boolean, false);
   v jsonb;
 BEGIN
   -- Honor DIFF_ON/OFF at the current path
   IF COALESCE((st->>'diffingOn')::boolean, true) = false THEN
     RETURN '';
+  END IF;
+
+  -- Simple SET mode (ignore order, ignore duplicates) when enabled and no setkeys/multiset active
+  IF set_mode = true AND setkeys IS NULL AND multiset_mode = false THEN
+    DECLARE
+      a_set jsonb := '[]'::jsonb;
+      b_set jsonb := '[]'::jsonb;
+      elem jsonb;
+      exists_in boolean;
+      rem jsonb := '[]'::jsonb;
+      add jsonb := '[]'::jsonb;
+    BEGIN
+      -- Build distinct sets from a and b (by JSONB equality)
+      FOR elem IN SELECT e FROM jsonb_array_elements(a) AS z(e) LOOP
+        SELECT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(a_set) AS s(x) WHERE s.x = elem
+        ) INTO exists_in;
+        IF NOT exists_in THEN
+          a_set := a_set || jsonb_build_array(elem);
+        END IF;
+      END LOOP;
+      FOR elem IN SELECT e FROM jsonb_array_elements(b) AS z(e) LOOP
+        SELECT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(b_set) AS s(x) WHERE s.x = elem
+        ) INTO exists_in;
+        IF NOT exists_in THEN
+          b_set := b_set || jsonb_build_array(elem);
+        END IF;
+      END LOOP;
+
+      -- Compute removals (in a_set but not in b_set)
+      FOR elem IN SELECT x FROM jsonb_array_elements(a_set) AS s(x) LOOP
+        SELECT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(b_set) AS t(y) WHERE t.y = elem
+        ) INTO exists_in;
+        IF NOT exists_in THEN
+          rem := rem || jsonb_build_array(elem);
+        END IF;
+      END LOOP;
+      -- Compute additions (in b_set but not in a_set)
+      FOR elem IN SELECT y FROM jsonb_array_elements(b_set) AS t(y) LOOP
+        SELECT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(a_set) AS s(x) WHERE s.x = elem
+        ) INTO exists_in;
+        IF NOT exists_in THEN
+          add := add || jsonb_build_array(elem);
+        END IF;
+      END LOOP;
+
+      -- If sets are equal, no diff
+      IF jsonb_array_length(rem) = 0 AND jsonb_array_length(add) = 0 THEN
+        RETURN '';
+      END IF;
+
+      -- Emit a set-style diff block at a synthetic index {}
+      idx_path := _jd_path_append(path, '{}'::jsonb);
+      out := out || '@ ' || _jd_render_path(idx_path) || E'\n';
+      -- Removals
+      FOR elem IN SELECT x FROM jsonb_array_elements(rem) AS s(x) LOOP
+        out := out || '- ' || _jd_render_value(elem) || E'\n';
+      END LOOP;
+      -- Additions
+      FOR elem IN SELECT y FROM jsonb_array_elements(add) AS t(y) LOOP
+        out := out || '+ ' || _jd_render_value(elem) || E'\n';
+      END LOOP;
+      RETURN out;
+    END;
   END IF;
 
   -- SetKeys mode: arrays of objects matched by identifier keys
@@ -461,21 +546,31 @@ BEGIN
         out := out || '+ ' || _jd_render_value(b_val) || E'\n';
       END LOOP;
 
-      -- Matched ids: recurse into object diffs
+      -- Matched ids: recurse into object diffs (use only the first occurrence per id on each side)
       FOR obj_id, a_val, b_val IN
-        WITH a_map AS (
-          SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val
-          FROM jsonb_array_elements(a) z(e)
-          WHERE jsonb_typeof(e) = 'object'
-          GROUP BY _id, e
-        ), b_map AS (
-          SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val
-          FROM jsonb_array_elements(b) z(e)
-          WHERE jsonb_typeof(e) = 'object'
-          GROUP BY _id, e
+        WITH a_first AS (
+          SELECT DISTINCT ON (_id)
+                 _id,
+                 val
+          FROM (
+            SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val, ord
+            FROM jsonb_array_elements(a) WITH ORDINALITY z(e,ord)
+            WHERE jsonb_typeof(e) = 'object'
+          ) s
+          ORDER BY _id, ord
+        ), b_first AS (
+          SELECT DISTINCT ON (_id)
+                 _id,
+                 val
+          FROM (
+            SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val, ord
+            FROM jsonb_array_elements(b) WITH ORDINALITY z(e,ord)
+            WHERE jsonb_typeof(e) = 'object'
+          ) s
+          ORDER BY _id, ord
         )
-        SELECT a_map._id, a_map.val, b_map.val
-        FROM a_map JOIN b_map USING (_id)
+        SELECT a_first._id, a_first.val, b_first.val
+        FROM a_first JOIN b_first USING (_id)
         ORDER BY _id::text
       LOOP
         subdiff := _jd_diff_text(a_val, b_val, _jd_path_append(path, obj_id), options);
@@ -486,6 +581,121 @@ BEGIN
           END IF;
           out := out || subdiff;
         END IF;
+      END LOOP;
+
+      -- Handle duplicate occurrences for ids present in both arrays: remove extras from A, add extras from B
+      -- Extras in A (beyond the first occurrence) should be deleted by index
+      FOR i, v IN
+        WITH a_elems AS (
+          SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val, ord
+          FROM jsonb_array_elements(a) WITH ORDINALITY z(e,ord)
+          WHERE jsonb_typeof(e) = 'object'
+        ), b_ids AS (
+          SELECT DISTINCT (_jd_ident_from_keys(e, setkeys)) AS _id
+          FROM jsonb_array_elements(b) z(e)
+          WHERE jsonb_typeof(e) = 'object'
+        ), a_dups AS (
+          SELECT _id, val, ord, min(ord) OVER (PARTITION BY _id) AS first_ord
+          FROM a_elems
+        )
+        SELECT ord, val
+        FROM a_dups
+        WHERE _id IN (SELECT _id FROM b_ids) AND ord > first_ord
+        ORDER BY ord
+      LOOP
+        IF NOT header_written THEN
+          out := out || '^ ' || _jd_render_value(jsonb_build_object('setkeys', setkeys)) || E'\n';
+          header_written := true;
+        END IF;
+        out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(i - 1))) || E'\n';
+        out := out || '- ' || _jd_render_value(v) || E'\n';
+      END LOOP;
+
+      -- Extras in B (beyond the first occurrence) should be added by index
+      FOR i, v IN
+        WITH b_elems AS (
+          SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val, ord
+          FROM jsonb_array_elements(b) WITH ORDINALITY z(e,ord)
+          WHERE jsonb_typeof(e) = 'object'
+        ), a_ids AS (
+          SELECT DISTINCT (_jd_ident_from_keys(e, setkeys)) AS _id
+          FROM jsonb_array_elements(a) z(e)
+          WHERE jsonb_typeof(e) = 'object'
+        ), b_dups AS (
+          SELECT _id, val, ord, min(ord) OVER (PARTITION BY _id) AS first_ord
+          FROM b_elems
+        )
+        SELECT ord, val
+        FROM b_dups
+        WHERE _id IN (SELECT _id FROM a_ids) AND ord > first_ord
+        ORDER BY ord
+      LOOP
+        IF NOT header_written THEN
+          out := out || '^ ' || _jd_render_value(jsonb_build_object('setkeys', setkeys)) || E'\n';
+          header_written := true;
+        END IF;
+        out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(i - 1))) || E'\n';
+        out := out || '+ ' || _jd_render_value(v) || E'\n';
+      END LOOP;
+
+      RETURN out;
+    END;
+  END IF;
+
+  -- Multiset mode: compare counts ignoring order, allow duplicates
+  IF multiset_mode THEN
+    DECLARE
+      have_diff boolean := false;
+      cnt int;
+      val jsonb;
+    BEGIN
+      -- quick equality check by counts
+      IF NOT EXISTS (
+        SELECT 1 FROM (
+          SELECT e AS v, count(*) AS c FROM jsonb_array_elements(a) z(e) GROUP BY e
+        ) aa FULL JOIN (
+          SELECT e AS v, count(*) AS c FROM jsonb_array_elements(b) z(e) GROUP BY e
+        ) bb ON aa.v = bb.v
+        WHERE COALESCE(aa.c,0) <> COALESCE(bb.c,0)
+      ) THEN
+        RETURN '';
+      END IF;
+
+      out := out || '^ ' || '"MULTISET"' || E'\n';
+      out := out || '@ ' || _jd_render_path(_jd_path_append(path, '[]'::jsonb)) || E'\n';
+
+      -- Deletions: values where a has more than b
+      FOR val, cnt IN
+        SELECT _v, (a_c - COALESCE(b_c,0)) AS n
+        FROM (
+          SELECT e AS _v, count(*) AS a_c FROM jsonb_array_elements(a) z(e) GROUP BY e
+        ) A LEFT JOIN (
+          SELECT e AS _v, count(*) AS b_c FROM jsonb_array_elements(b) z(e) GROUP BY e
+        ) B USING (_v)
+        WHERE (a_c - COALESCE(b_c,0)) > 0
+        ORDER BY 1
+      LOOP
+        WHILE cnt > 0 LOOP
+          out := out || '- ' || _jd_render_value(val) || E'\n';
+          cnt := cnt - 1;
+        END LOOP;
+      END LOOP;
+
+      -- Additions: values where b has more than a
+      FOR val, cnt IN
+        SELECT _v, (b_c - COALESCE(a_c,0)) AS n
+        FROM (
+          SELECT e AS _v, count(*) AS b_c FROM jsonb_array_elements(b) z(e) GROUP BY e
+        ) B LEFT JOIN (
+          SELECT e AS _v, count(*) AS a_c FROM jsonb_array_elements(a) z(e) GROUP BY e
+        ) A USING (_v)
+        WHERE (b_c - COALESCE(a_c,0)) > 0
+        ORDER BY 1
+      LOOP
+        WHILE cnt > 0 LOOP
+          out := out || '+ ' || _jd_render_value(val) || E'\n';
+          cnt := cnt - 1;
+        END LOOP;
       END LOOP;
 
       RETURN out;
@@ -576,6 +786,40 @@ BEGIN
     RETURN '';
   END IF;
 
+  -- For normal arrays, compute common prefix/suffix while treating numerically-close numbers as equal per options
+  WHILE p < la AND p < lb LOOP
+    idx_path := _jd_path_append(path, to_jsonb(p));
+    IF jsonb_typeof(a->p) = 'number' AND jsonb_typeof(b->p) = 'number' THEN
+      IF NOT _jd_numbers_close_prec(a->p, b->p, ((_jd_options_state(options, idx_path)->>'precision')::numeric)) THEN
+        EXIT;
+      END IF;
+    ELSE
+      IF (a->p) IS DISTINCT FROM (b->p) THEN
+        EXIT;
+      END IF;
+    END IF;
+    p := p + 1;
+  END LOOP;
+
+  WHILE (s < la - p) AND (s < lb - p) LOOP
+    idx_path := _jd_path_append(path, to_jsonb(lb - s - 1));
+    IF jsonb_typeof(a->(la - s - 1)) = 'number' AND jsonb_typeof(b->(lb - s - 1)) = 'number' THEN
+      IF NOT _jd_numbers_close_prec(a->(la - s - 1), b->(lb - s - 1), ((_jd_options_state(options, idx_path)->>'precision')::numeric)) THEN
+        EXIT;
+      END IF;
+    ELSE
+      IF (a->(la - s - 1)) IS DISTINCT FROM (b->(lb - s - 1)) THEN
+        EXIT;
+      END IF;
+    END IF;
+    s := s + 1;
+  END LOOP;
+
+  -- If arrays are effectively equal under precision, return no diff
+  IF p = la AND p = lb THEN
+    RETURN '';
+  END IF;
+
   idx_path := _jd_path_append(path, to_jsonb(p));
   out := out || '@ ' || _jd_render_path(idx_path) || E'\n';
 
@@ -626,11 +870,11 @@ DECLARE
   v_b jsonb;
   st jsonb := _jd_options_state(options, path);
   eps numeric := ((jsonb_extract_path_text(_jd_options_state(options, path), 'precision'))::numeric);
+  color boolean := COALESCE((_jd_options_state(options, path)->>'color')::boolean, false);
+  default_eps numeric := 1e-15;
+  header_emitted boolean := false;
+  diff_here boolean := COALESCE((st->>'diffingOn')::boolean, true);
 BEGIN
-  -- Respect DIFF_ON/OFF option: if diffing is off here, produce no diff
-  IF COALESCE((st->>'diffingOn')::boolean, true) = false THEN
-    RETURN '';
-  END IF;
   -- Handle equality including NULLs/void
   IF a IS NOT DISTINCT FROM b THEN
     RETURN '';
@@ -641,12 +885,37 @@ BEGIN
     RETURN '';
   END IF;
 
-  -- Void transitions produce single +/- line
+  -- Emit headers if needed (color and precision) when we are about to output a change at this path
+  PERFORM 1; -- placeholder no-op
+
+  -- Void transitions produce single +/- line when allowed at this path
   IF ta = 'void' AND tb <> 'void' THEN
+    IF NOT diff_here THEN
+      RETURN '';
+    END IF;
+    IF color THEN
+      out := out || '^ ' || '"COLOR"' || E'\n';
+      header_emitted := true;
+    END IF;
+    IF eps IS NOT NULL AND eps <> default_eps THEN
+      out := out || '^ ' || _jd_render_value(jsonb_build_object('precision', to_jsonb(eps))) || E'\n';
+      header_emitted := true;
+    END IF;
     out := out || '@ ' || _jd_render_path(path) || E'\n'
                || '+ ' || _jd_render_value(b) || E'\n';
     RETURN out;
   ELSIF tb = 'void' AND ta <> 'void' THEN
+    IF NOT diff_here THEN
+      RETURN '';
+    END IF;
+    IF color THEN
+      out := out || '^ ' || '"COLOR"' || E'\n';
+      header_emitted := true;
+    END IF;
+    IF eps IS NOT NULL AND eps <> default_eps THEN
+      out := out || '^ ' || _jd_render_value(jsonb_build_object('precision', to_jsonb(eps))) || E'\n';
+      header_emitted := true;
+    END IF;
     out := out || '@ ' || _jd_render_path(path) || E'\n'
                || '- ' || _jd_render_value(a) || E'\n';
     RETURN out;
@@ -654,7 +923,7 @@ BEGIN
 
   -- Objects: recurse per key
   IF ta = 'object' AND tb = 'object' THEN
-    -- removals (deterministic order)
+    -- removals (deterministic order) — only when emitting at this path is allowed
     FOR k IN
       SELECT key FROM (
         SELECT key FROM jsonb_object_keys(a) AS key
@@ -663,8 +932,18 @@ BEGIN
       ) x
       ORDER BY key
     LOOP
-      out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
-                  || '- ' || _jd_render_value(a->k) || E'\n';
+      IF diff_here THEN
+        IF out = '' THEN
+          IF color THEN
+            out := out || '^ ' || '"COLOR"' || E'\n';
+          END IF;
+          IF eps IS NOT NULL AND eps <> default_eps THEN
+            out := out || '^ ' || _jd_render_value(jsonb_build_object('precision', to_jsonb(eps))) || E'\n';
+          END IF;
+        END IF;
+        out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
+                    || '- ' || _jd_render_value(a->k) || E'\n';
+      END IF;
     END LOOP;
 
     -- changes (deterministic order)
@@ -696,15 +975,34 @@ BEGIN
       ) x
       ORDER BY key
     LOOP
-      out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
-                  || '+ ' || _jd_render_value(b->k) || E'\n';
+      IF diff_here THEN
+        IF out = '' THEN
+          IF color THEN
+            out := out || '^ ' || '"COLOR"' || E'\n';
+          END IF;
+          IF eps IS NOT NULL AND eps <> default_eps THEN
+            out := out || '^ ' || _jd_render_value(jsonb_build_object('precision', to_jsonb(eps))) || E'\n';
+          END IF;
+        END IF;
+        out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
+                    || '+ ' || _jd_render_value(b->k) || E'\n';
+      END IF;
     END LOOP;
 
     RETURN out;
   ELSIF ta = 'array' AND tb = 'array' THEN
     RETURN _jd_diff_array(a, b, path, options);
   ELSE
-    -- Scalar changes or type changes (non-void): emit replace as -/+ pair
+    -- Scalar changes or type changes (non-void): emit replace as -/+ pair when allowed at this path
+    IF NOT diff_here THEN
+      RETURN '';
+    END IF;
+    IF color THEN
+      out := out || '^ ' || '"COLOR"' || E'\n';
+    END IF;
+    IF eps IS NOT NULL AND eps <> default_eps THEN
+      out := out || '^ ' || _jd_render_value(jsonb_build_object('precision', to_jsonb(eps))) || E'\n';
+    END IF;
     out := out || '@ ' || _jd_render_path(path) || E'\n'
                || '- ' || _jd_render_value(a) || E'\n'
                || '+ ' || _jd_render_value(b) || E'\n';
@@ -721,8 +1019,28 @@ RETURNS text
 LANGUAGE plpgsql
 STABLE
 AS $$
+DECLARE
+  body text;
+  out text := '';
+  elem jsonb;
 BEGIN
-  RETURN _jd_diff_text(a, b, '[]'::jsonb, options);
+  body := _jd_diff_text(a, b, '[]'::jsonb, options);
+
+  -- If there is no diff, return immediately (do not emit headers)
+  IF COALESCE(body, '') = '' THEN
+    RETURN '';
+  END IF;
+
+  -- Emit PathOptions headers (objects with '@' and '^') in the order provided
+  IF options IS NOT NULL AND jsonb_typeof(options) = 'array' THEN
+    FOR elem IN SELECT e FROM jsonb_array_elements(options) AS z(e) LOOP
+      IF jsonb_typeof(elem) = 'object' AND (elem ? '@') AND (elem ? '^') THEN
+        out := out || '^ ' || _jd_render_value(elem) || E'\n';
+      END IF;
+    END LOOP;
+  END IF;
+
+  RETURN out || body;
 END;
 $$;
 
