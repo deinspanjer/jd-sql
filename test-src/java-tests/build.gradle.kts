@@ -1,5 +1,6 @@
 plugins {
     java
+    idea
 }
 
 java {
@@ -36,11 +37,16 @@ dependencies {
 sourceSets {
     @Suppress("unused") val test by getting {
         resources {
-            // Upstream jd spec runner resources (JSON cases, YAML, etc.)
-            srcDir(rootProject.file("external/jd/spec/test"))
+            // Only include necessary upstream spec resources, not the entire test tree
+            // to avoid bringing in binaries like the upstream test-runner or last test results.
+            // Keep just the JSON spec cases needed by our Java tests.
+            srcDir(rootProject.file("external/jd/spec/test/cases"))
 
-            // Project-provided spec runner configs and testdata
-            srcDir(rootProject.file("test-src/testdata"))
+            // Project-provided resources (trimmed to what Java tests actually need)
+            // - Custom/spec-extension cases used by java-tests
+            srcDir(rootProject.file("test-src/testdata/cases"))
+            // - Configs for jd-sql-spec-runner (if referenced by tests)
+            srcDir(rootProject.file("test-src/testdata/jd-sql-spec-runner/configs"))
         }
         // Note: If additional non-standard Java/Kotlin test sources are added in the
         // repository outside of this subproject, declare them here with:
@@ -77,4 +83,15 @@ tasks.test {
             }
         }
     })
+}
+
+// Ensure IntelliJ uses the same output directories as Gradle so that
+// running tests from the IDE doesn't create a separate test-src/java-tests/out tree.
+idea {
+    module {
+        inheritOutputDirs = false
+        // Match Gradle's build/classes layout under the unified root out/ directory
+        outputDir = layout.buildDirectory.dir("classes/java/main").get().asFile
+        testOutputDir = layout.buildDirectory.dir("classes/java/test").get().asFile
+    }
 }
