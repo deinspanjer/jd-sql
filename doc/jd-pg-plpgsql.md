@@ -1,62 +1,255 @@
-jd-sql PL/pgSQL implementation (initial)
+jd-sql PL/pgSQL: Upstream jd v2 API and PostgreSQL Type/Function Mapping
 
 Overview
 
-This document describes the initial PL/pgSQL-only implementation of jd-sql functions within PostgreSQL. While jd-sql targets SQL implementations beyond just PostgreSQL, this document focuses on the PostgreSQL-native approach to generate and apply diffs between JSONB values without requiring plv8.
+This document defines the PostgreSQL PL/pgSQL surface that mirrors the upstream jd v2 API for JSON diffing and patching. It introduces SQL domains and composite types to express jd concepts (paths, options, diffs) and specifies the public `jd_` functions (JSONB-only) together with private `_jd_` helpers. YAML input/output is not supported for the PL/pgSQL variant.
 
-Scope for this initial version
-- Top-level object diffs: add, remove, replace operations for keys at the document root.
-- Whole-value replace for arrays and scalars when values differ.
-- Patch application for the operation set produced by jd_diff.
-- No array index paths or deep/nested paths yet. These will be added iteratively.
+Upstream jd v2, summarized
 
-Installation (PostgreSQL)
-- Ensure you are connected to your PostgreSQL 15+ database.
-- Load the SQL script:
-  \i sql/jd_pg_plpgsql.sql
+- Values: `JsonNode` with methods: `Json(opts...)`, `Yaml(opts...)`, `Equals(n, opts...)`, `Diff(n, opts...)`, `Patch(d)`. Constructor: `NewJsonNode(any)`.
+- Diffs: `DiffElement{Metadata, Options, Path, Before, Remove, Add, After}` and `Diff` (slice of elements). Renderers: `Render`, `RenderPatch` (RFC 6902), `RenderMerge` (RFC 7386). Readers: `ReadDiff*`, `ReadPatch*`, `ReadMerge*`.
+- Options: constants `MERGE`, `SET`, `MULTISET`, `COLOR`, `DIFF_ON`, `DIFF_OFF`; builders `Precision(x)`, `SetKeys(...)`, `PathOption(@, ^...)`; parser `ReadOptionsString`.
+- Paths: `Path` of elements: key (string), index (number), set (`{}`), multiset (`[]`), setkeys (`{...}`), multisetkeys (`[{...}]`).
+- Metadata: `Merge` flag per hunk influences patch strategy.
 
-Functions
-- jd_diff(a jsonb, b jsonb, options jsonb DEFAULT NULL) → text
-  - Produces a jd v2-style textual structural diff for core cases.
-  - Honors a JSONB `options` array using jd PathOptions syntax (subset):
-    - Global options like `"DIFF_ON"`, `"DIFF_OFF"`, `"SET"`, and `{ "precision": N }`.
-    - PathOptions objects: `{ "@": [path...], "^": [ directives... ] }`.
+Design goals for PostgreSQL
 
-  Supported directives (subset):
-  - `"SET"`: Compare arrays as mathematical sets at the targeted path(s) — ignore order; the diff shows header `^ "SET"` and changes using `@ [path,{}]` with `-`/`+` elements.
-  - `{ "precision": N }`: Treat two numbers within `N` as equal for diffing.
-  - `"DIFF_ON"` / `"DIFF_OFF"`: Enable/disable diffing for targeted paths.
+- Keep user-facing API JSONB-native: accept upstream-style JSON shapes where possible.
+- Use SQL domains on `jsonb` for JSON-shaped concepts (options, path, RFC patches) and composite types for rowset-friendly structures (diff elements).
+- Public functions are prefixed `jd_`; internal helpers use `_jd_` and are not meant to be called directly.
 
-- jd_patch(a jsonb, diff jsonb, options jsonb DEFAULT NULL) → jsonb
-  - Applies the simplified jd-like operation array to produce a new JSONB value.
-  - The `options` parameter is accepted for signature consistency; it is not used by this simplified patcher.
+Domains (preferred for JSON-shaped concepts)
+
+Use CHECK constraints that call private, immutable validators (`_jd_...`) to ensure shape correctness.
+
+1) Options domain: `jd_option`
+- Definition: `CREATE DOMAIN jd_option AS jsonb CHECK (_jd_validate_options(VALUE));`
+- Semantics: a JSON array of jd options using upstream encoding.
+  - Allowed entries:
+    - Strings: `"MERGE"`, `"SET"`, `"MULTISET"`, `"COLOR"`, `"DIFF_ON"`, `"DIFF_OFF"`
+    - Objects: `{"precision": number}`, `{"setkeys": [text,...]}`, `{"@": [path...], "^": [options...]}`, `{"Merge": true}`
+- Validator: `_jd_validate_options(options jsonb) RETURNS boolean` (IMMUTABLE)
+
+2) Path domain: `jd_path`
+- Definition: `CREATE DOMAIN jd_path AS jsonb CHECK (_jd_validate_path(VALUE));`
+- Semantics: a JSON array with elements representing jd path elements:
+  - string (object key), number (array index), empty object `{}` (set), empty array `[]` (multiset), object `{...}` (setkeys), array with one object `[{...}]` (multisetkeys)
+- Validator: `_jd_validate_path(path jsonb) RETURNS boolean` (IMMUTABLE)
+
+3) RFC 6902 patch domain: `jd_patch`
+- Definition: `CREATE DOMAIN jd_patch AS jsonb CHECK (_jd_validate_rfc6902(VALUE));`
+- Semantics: a JSON array of operation objects per RFC 6902.
+- Validator: `_jd_validate_rfc6902(patch jsonb) RETURNS boolean` (IMMUTABLE)
+
+4) RFC 7386 merge patch domain: `jd_merge`
+- Definition: `CREATE DOMAIN jd_merge AS jsonb CHECK (jsonb_typeof(VALUE) = 'object');`
+- Optional stricter validator: `_jd_validate_rfc7386(merge jsonb) RETURNS boolean`
+
+Composites (rowset-friendly structures)
+
+1) `jd_metadata`
+- `create type jd_metadata as ( merge boolean );`
+
+2) `jd_diff_element`
+- `create type jd_diff_element as (
+    metadata jd_metadata,
+    options  jd_option,
+    path     jd_path,
+    before   jsonb[],
+    remove   jsonb[],
+    add      jsonb[],
+    after    jsonb[]
+  );`
+
+Rationale: Returning diffs as `SETOF jd_diff_element` makes it easy to consume in SQL, JOIN by path, and aggregate when needed. Domains keep arguments/returns simple where natural JSON shapes exist.
+
+Public functions (JSONB-only)
+
+Comparison and diff creation
+
+- `jd_equal(a jsonb, b jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS boolean`
+  - Equivalent to `JsonNode.Equals` with jd options (global or path-scoped).
+
+- `jd_diff_text(a jsonb, b jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS text`
+  - Equivalent to `Diff.Render()` in jd native text format. Rendering-only options like `COLOR` may be honored.
+
+- `jd_diff_struct(a jsonb, b jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS SETOF jd_diff_element`
+  - Structural diff suitable for programmatic inspection.
+
+- `jd_diff_patch(a jsonb, b jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS jd_patch`
+  - Equivalent to `Diff.RenderPatch()` — RFC 6902 patch as JSONB.
+
+- `jd_diff_merge(a jsonb, b jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS jd_merge`
+  - Equivalent to `Diff.RenderMerge()` — RFC 7386 patch as JSONB.
+
+Patch application
+
+- `jd_patch_text(value jsonb, diff_text text) RETURNS jsonb`
+  - Apply jd native diff text to a JSONB value.
+
+- `jd_patch_struct(value jsonb, diff_elements jd_diff_element[]) RETURNS jsonb`
+  - Apply a structured diff (array form). Users can `array_agg` from a rowset.
+
+- `jd_apply_patch(value jsonb, patch jd_patch) RETURNS jsonb`
+  - Apply an RFC 6902 JSON Patch to a JSONB value.
+
+- `jd_apply_merge(value jsonb, merge jd_merge) RETURNS jsonb`
+  - Apply an RFC 7386 Merge Patch to a JSONB value.
+
+Diff parsing and rendering
+
+- `jd_read_diff_text(diff_text text) RETURNS SETOF jd_diff_element`
+  - Parse jd native diff text into structured elements.
+
+- `jd_render_diff_text(diff_elements jd_diff_element[], options jd_option DEFAULT '[]'::jsonb) RETURNS text`
+  - Render structured diff elements into jd native text.
+
+- `jd_render_diff_patch(diff_elements jd_diff_element[]) RETURNS jd_patch`
+  - Convert structured diff elements to RFC 6902 JSON Patch.
+
+- `jd_render_diff_merge(diff_elements jd_diff_element[]) RETURNS jd_merge`
+  - Convert structured diff elements to RFC 7386 Merge Patch.
+
+Render helper
+
+- `jd_render_json(value jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS text`
+  - Render normalized JSON text (no YAML support in PL/pgSQL).
+
+Optional public utility
+
+- `jd_options_normalize(options jd_option) RETURNS jd_option`
+  - Validate/normalize an options array (no-op if already valid/canonical).
+
+Private helper functions (`_jd_` prefix)
+
+Validators for domains (IMMUTABLE)
+
+- `_jd_validate_options(options jsonb) RETURNS boolean`
+- `_jd_validate_path(path jsonb) RETURNS boolean`
+- `_jd_validate_rfc6902(patch jsonb) RETURNS boolean`
+- `_jd_validate_rfc7386(merge jsonb) RETURNS boolean` (optional)
+
+Options/path parsing and normalization
+
+- `_jd_options_parse(options jd_option) RETURNS jsonb`  -- optional normalized internal form
+- `_jd_path_normalize(path jd_path) RETURNS jd_path`
+
+Equality and numeric precision
+
+- `_jd_equal_impl(a jsonb, b jsonb, options jd_option) RETURNS boolean`
+- `_jd_number_equal(a jsonb, b jsonb, precision numeric) RETURNS boolean`
+- `_jd_setkeys_project(obj jsonb, keynames text[]) RETURNS jsonb`
+
+Diff construction and rendering
+
+- `_jd_diff_build(a jsonb, b jsonb, base_path jd_path, options jd_option) RETURNS jd_diff_element[]`
+- `_jd_diff_render_text(diff_elems jd_diff_element[], options jd_option) RETURNS text`
+- `_jd_diff_render_patch(diff_elems jd_diff_element[]) RETURNS jd_patch`
+- `_jd_diff_render_merge(diff_elems jd_diff_element[]) RETURNS jd_merge`
+
+Diff parsing and patching
+
+- `_jd_read_diff_text(diff_text text) RETURNS jd_diff_element[]`
+- `_jd_patch_apply(value jsonb, diff_elems jd_diff_element[]) RETURNS jsonb`
+- `_jd_patch_apply_element(value jsonb, de jd_diff_element) RETURNS jsonb`
+- `_jd_patch_merge_strategy(path jd_path, old jsonb, new jsonb) RETURNS jsonb`
+
+Utility
+
+- `_jd_typeof(j jsonb) RETURNS text`
+
+Domains vs composites: rationale
+
+- Options (jd_option) → Domain:
+  - Directly accepts upstream jd option shapes; CHECK constraints provide validation; no composite conversion.
+
+- Path (jd_path) → Domain:
+  - Matches upstream path JSON array; easy to include inside options; validated via CHECK.
+
+- RFC 6902/7386 (jd_patch, jd_merge) → Domains:
+  - Natural JSON forms; interoperable with external tools; validated via CHECK.
+
+- Diff element (jd_diff_element) → Composite:
+  - Convenient for rowset results and SQL joins; uses domains for embedded JSON concepts.
+
+- Metadata (jd_metadata) → Composite:
+  - Future-proof if additional flags are added.
+
+Example DDL snippets (illustrative)
+
+```sql
+-- Domains
+create domain jd_option as jsonb
+  check (_jd_validate_options(value));
+
+create domain jd_path as jsonb
+  check (_jd_validate_path(value));
+
+create domain jd_patch as jsonb
+  check (_jd_validate_rfc6902(value));
+
+create domain jd_merge as jsonb
+  check (jsonb_typeof(value) = 'object');
+
+-- Composites
+create type jd_metadata as (
+  merge boolean
+);
+
+create type jd_diff_element as (
+  metadata jd_metadata,
+  options  jd_option,
+  path     jd_path,
+  before   jsonb[],
+  remove   jsonb[],
+  add      jsonb[],
+  after    jsonb[]
+);
+```
 
 Examples
-- Top-level changes:
-  SELECT jd_diff('{"a":1}'::jsonb, '{"a":2,"b":3}'::jsonb, NULL);
-  → [{"op":"replace","path":["a"],"value":2},{"op":"add","path":["b"],"value":3}]
 
-- Array as set (ignore order):
-  SELECT jd_diff('{"tags":[1,2,3]}'::jsonb, '{"tags":[3,1,2]}'::jsonb, '["SET"]');
-  → ''
+Diff and render jd text
 
-  SELECT jd_diff('{"tags":["red","blue","green"]}'::jsonb, '{"tags":["red","blue","yellow"]}'::jsonb, '["SET"]');
-  → ^ "SET"\n@ ["tags",{}]\n- "green"\n+ "yellow"\n
+```sql
+select jd_diff_text(
+  '{"foo":["bar","baz"]}'::jsonb,
+  '{"foo":["bar","bam","boom"]}'::jsonb,
+  '[]'::jsonb
+);
+```
 
-- Apply patch:
-  SELECT jd_patch('{"a":1}'::jsonb, '[{"op":"replace","path":["a"],"value":2},{"op":"add","path":["b"],"value":3}]', NULL);
-  → {"a":2,"b":3}
+Equality with precision
 
-Notes on compatibility with jd
-- The canonical jd format is text-based and supports deep paths, array contexts, and options. This initial version focuses on a pragmatic subset suited for early jd-sql usage in SQL. The intention is to expand functionality towards jd feature parity over time. The `options` parameter currently supports a subset: global/PathOptions for `DIFF_ON`/`DIFF_OFF`, `SET` for set-like array comparison, and numeric `precision`.
+```sql
+select jd_equal('1.000001'::jsonb, '1.000002'::jsonb, '[{"precision":1e-5}]');
+-- true
+```
 
-Testing with Equinox
-- We plan to validate jd-sql SQL functions using JerrySievert/equinox. The repository will contain SQL-based tests demonstrating expected behavior for jd_diff and jd_patch.
-- Until the full test harness is wired into the Makefile flow, you can run the SQL tests manually in a PostgreSQL container/session with psql.
+Treat array of objects as a set with keys
 
-Roadmap
-- Deep path support (nested objects, array indices)
-- Array LCS-based diffs
-- Options (SET, MULTISET, precision, setkeys) with PathOptions
-- Translations to/from JSON Patch and JSON Merge Patch
-- DIFF_ON/DIFF_OFF support
+```sql
+select jd_diff_text(
+  '{"items":[{"id":1,"v":"a"},{"id":2,"v":"b"}]}'::jsonb,
+  '{"items":[{"id":2,"v":"b"},{"id":1,"v":"z"}]}'::jsonb,
+  '[{"@":["items",{}],"^":["SET", {"setkeys":["id"]}]}]'
+);
+```
+
+Apply RFC 6902 patch
+
+```sql
+select jd_apply_patch(
+  '{"a":1}'::jsonb,
+  '[{"op":"replace","path":"/a","value":2},{"op":"add","path":"/b","value":3}]'::jsonb
+);
+-- {"a":2,"b":3}
+```
+
+Scope and constraints (PL/pgSQL variant)
+
+- JSONB-only: no YAML input/output.
+- Options are provided in upstream jd JSON encoding via `jd_option` domain and validated by `_jd_validate_options`.
+- Path arrays follow upstream jd path syntax and are validated by `_jd_validate_path`.
+- Merge vs strict patch semantics are captured per-hunk by `jd_metadata.merge`.
+- Rendering option `COLOR` may be a no-op in PL/pgSQL rendering; textual diff format remains the target.
