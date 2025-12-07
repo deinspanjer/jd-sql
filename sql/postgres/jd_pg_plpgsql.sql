@@ -1014,7 +1014,8 @@ $$;
 COMMENT ON FUNCTION _jd_diff_text(jsonb, jsonb, jsonb, jsonb) IS 'Internal helper: recursive jd-style textual diff limited to core spec cases. Honors options (DIFF_ON/OFF, precision).';
 
 
-CREATE OR REPLACE FUNCTION jd_diff(a jsonb, b jsonb, options jsonb DEFAULT NULL)
+-- Text-mode wrapper retained for convenience: returns the human-readable jd diff as TEXT
+CREATE OR REPLACE FUNCTION jd_diff_text(a jsonb, b jsonb, options jsonb DEFAULT NULL)
 RETURNS text
 LANGUAGE plpgsql
 STABLE
@@ -1044,7 +1045,25 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION jd_diff(jsonb, jsonb, jsonb) IS 'Compute jd spec-like textual diff for core cases. Returns empty string when equal. Honors options (DIFF_ON/OFF, precision).';
+COMMENT ON FUNCTION jd_diff_text(jsonb, jsonb, jsonb) IS 'Compute jd spec-like textual diff for core cases and return TEXT. Returns empty string when equal. Honors options (DIFF_ON/OFF, precision).';
+
+
+-- Primary entrypoint: returns JSONB. In text mode this is a JSON string value containing the jd diff text.
+CREATE OR REPLACE FUNCTION jd_diff(a jsonb, b jsonb, options jsonb DEFAULT NULL)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+  txt text;
+BEGIN
+  -- For now, only text format is implemented; return as JSON string
+  txt := jd_diff_text(a, b, options);
+  RETURN to_jsonb(txt);
+END;
+$$;
+
+COMMENT ON FUNCTION jd_diff(jsonb, jsonb, jsonb) IS 'Compute jd spec-like diff and return JSONB. In text mode, returns a JSON string containing the diff text; empty string when equal.';
 
 
 CREATE OR REPLACE FUNCTION _jd_apply_op(doc jsonb, op jsonb)

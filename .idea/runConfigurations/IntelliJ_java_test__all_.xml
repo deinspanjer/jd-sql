@@ -7,7 +7,7 @@
       <option name="useCurrentConnection" value="false" />
     </extension>
     <option name="PACKAGE_NAME" value="dev.jdsql" />
-    <option name="MAIN_CLASS_NAME" value="dev.jdsql.PgSpecIT" />
+    <option name="MAIN_CLASS_NAME" value="dev.jdsql.EngineSpecIT" />
     <option name="METHOD_NAME" value="" />
     <option name="TEST_OBJECT" value="class" />
     <method v="2">

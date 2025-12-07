@@ -1,11 +1,41 @@
 [
   {
-    "name": "sql_custom_simple_replace",
-    "description": "Basic jd-sql specific case placeholder: replace a scalar value",
+    "name": "jd_diff_text_mode_default",
+    "description": "Call jd_diff (JSONB) in default text mode; harness should unquote JSON string to jd text.",
     "category": "jd-sql-custom",
     "content_a": "{\"a\":1}",
     "content_b": "{\"a\":2}",
-    "expected_diff": "[{\"op\":\"replace\",\"path\":[\"a\"],\"value\":2]",
+    "expected_diff": "@ [\"a\"]\n- 1\n+ 2\n",
     "expected_exit": 1
+  },
+  {
+    "name": "jd_diff_text_explicit",
+    "description": "Call jd_diff_text (TEXT) explicitly and compare jd text.",
+    "category": "jd-sql-custom",
+    "sql_function": "jd_diff_text",
+    "content_a": "{\"x\":[1,2]}",
+    "content_b": "{\"x\":[1,2,3]}",
+    "expected_diff": "@ [2]\n  2\n+ 3\n]\n",
+    "expected_exit": 1
+  },
+  {
+    "name": "jd_diff_text_with_headers",
+    "description": "Verify headers are included when options contain color/precision/path directives (text output).",
+    "category": "jd-sql-custom",
+    "sql_function": "jd_diff_text",
+    "content_a": "{\"a\":1}",
+    "content_b": "{\"a\":2}",
+    "args": ["-color", "-precision=0.1", "-opts=[{\"@\":[\"a\"],\"^\":[\"DIFF_ON\"]}]"],
+    "expected_diff": "^ \"COLOR\"\n^ {\"precision\":0.1}\n@ [\"a\"]\n- 1\n+ 2\n",
+    "expected_exit": 1
+  },
+  {
+    "name": "no_diff_equal_docs_jd_diff",
+    "description": "jd_diff should return empty string (JSON string) when no changes; harness treats as no diff.",
+    "category": "jd-sql-custom",
+    "content_a": "{\"k\":\"v\"}",
+    "content_b": "{\"k\":\"v\"}",
+    "expected_diff": "",
+    "expected_exit": 0
   }
 ]

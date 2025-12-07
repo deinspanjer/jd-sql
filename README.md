@@ -27,12 +27,25 @@ See the [examples/jsonb_diff_merge.sql](examples/postgres/jsonb_diff_merge.sql) 
 Quick example:
 
 ```
-SELECT jd_diff('{"a":1}'::jsonb, '{"a":2,"b":3}'::jsonb, NULL);
--- => [{"op":"replace","path":["a"],"value":2},{"op":"add","path":["b"],"value":3}]
+-- Textual jd format (human-readable) as TEXT
+SELECT jd_diff_text('{"a":1}'::jsonb, '{"a":2}'::jsonb, NULL);
+-- => @ ["a"]
+--    - 1
+--    + 2
 
-SELECT jd_patch('{"a":1}'::jsonb, '[{"op":"replace","path":["a"],"value":2},{"op":"add","path":["b"],"value":3}]', NULL);
--- => {"a":2,"b":3}
+-- JSON-returning entrypoint
+-- Note: In text mode, the JSONB result is a JSON string containing the jd text shown above.
+SELECT jd_diff('{"a":1}'::jsonb, '{"a":2}'::jsonb, NULL);
+-- => "@ [\"a\"]\n- 1\n+ 2\n"
+
+-- Patching helpers (work in progress; examples subject to change as spec coverage expands)
+SELECT jd_patch('{"a":1}'::jsonb, '[{"op":"replace","path":["a"],"value":2}]', NULL);
+-- => {"a":2}
 ```
+
+Notes on return types:
+- jd_diff(a jsonb, b jsonb, options jsonb) now returns JSONB. When the selected output format is textual jd, the returned JSONB value is a JSON string containing the multi-line jd diff text. This allows callers that prefer JSON-only pipelines to treat the result uniformly as JSONB.
+- jd_diff_text(a jsonb, b jsonb, options jsonb) is provided for convenience when a TEXT result is desired directly.
 
 ## Features
 
@@ -83,7 +96,7 @@ Java-based integration tests for jd-sql now live under `test-src/java-tests` as 
 - Watch SQL and re-run tests on change: `task --watch dev:watch-sql` (includes Java tests via `java:watch-sql`)
 
 Notes:
-- The tests use Testcontainers to start a disposable PostgreSQL and install the SQL from `sql/postgres/*.sql` before executing spec cases.
+- The tests use Testcontainers to start a disposable database engine per install script and then execute the spec cases against the installed functions. Today the runner starts PostgreSQL for scripts under `sql/postgres/**`. The structure is intentionally engine‑agnostic to support additional engines in the future (duckdb, sqlite, databricks, etc.).
 - The test harness runs upstream jd spec cases and any project-specific cases. You can add project-specific cases under either `test-src/java-tests/src/test/resources/jd-sql/cases` or the shared `test-src/testdata/cases`.
 
 YAML-mode handling:
@@ -115,6 +128,18 @@ Examples:
 ./gradlew :test-src:java-tests:test -Djdsql.spec.categories=jd-core
 JDSQL_SPEC_CATEGORIES=jd-core,jd-format ./gradlew :test-src:java-tests:test
 ```
+
+Test tree grouping:
+- Tests are organized into a nested container hierarchy to make browsing easier in the IDE and reports:
+  - Engine (e.g., `PostgreSQL`)
+    - Version (only shown when a version segment exists in the path; otherwise elided using `default`)
+      - Variant (e.g., `plpgsql`, `plv8` as inferred from SQL filename)
+        - `bootstrap` (file existence + container start + SQL install)
+        - `cases:<category>` (e.g., `cases:jd-core`, `cases:jd-format`), containing the individual spec cases
+        - `teardown` (container stop)
+
+Runner class:
+- The engine‑agnostic test runner class is `dev.jdsql.EngineSpecIT` (previously `PgSpecIT`). It discovers install scripts under `sql/**` and currently executes those under `sql/postgres/**` using a PostgreSQL Testcontainer. As additional engines are implemented, corresponding scripts (e.g., `sql/duckdb/**`) will appear as separate top-level engine groups in the test tree.
 
 ### Upstream jd submodule and spec tests
 

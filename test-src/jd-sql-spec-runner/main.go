@@ -276,25 +276,46 @@ func runPostgres(cfg Config, fileA, fileB string) (int, error) {
 
 	row := stmt.QueryRow(arg1, arg2)
 
-	// Try text first
-	var textOut sql.NullString
-	if err := row.Scan(&textOut); err == nil {
-		if textOut.Valid {
-			out := textOut.String
-			// print without forcing newline
-			fmt.Fprint(os.Stdout, out)
-			if strings.TrimSpace(out) == "" {
-				return 0, nil
-			}
-			return 1, nil
-		}
-		return 0, nil
-	} else {
-		// Re-query to get raw JSON bytes by executing again (since Scan consumed row)
-		row2 := db.QueryRow(cfg.SQL, arg1, arg2)
-		var jsonBytes []byte
-		if err2 := row2.Scan(&jsonBytes); err2 == nil {
-			// print compact JSON
+ // Try text first
+ var textOut sql.NullString
+ if err := row.Scan(&textOut); err == nil {
+     if textOut.Valid {
+         out := textOut.String
+         // If the text looks like JSON, attempt to decode.
+         var decoded any
+         if json.Unmarshal([]byte(out), &decoded) == nil {
+             switch v := decoded.(type) {
+             case string:
+                 // JSON string -> emit unquoted payload
+                 fmt.Fprint(os.Stdout, v)
+                 if strings.TrimSpace(v) == "" {
+                     return 0, nil
+                 }
+                 return 1, nil
+             default:
+                 // Valid JSON (object/array/number/bool/null): emit compact JSON
+                 enc, _ := json.Marshal(v)
+                 fmt.Fprint(os.Stdout, string(enc))
+                 if jsonDiffPresent(v) {
+                     return 1, nil
+                 }
+                 return 0, nil
+             }
+         }
+         // Not JSON: treat as plain text jd output
+         fmt.Fprint(os.Stdout, out)
+         if strings.TrimSpace(out) == "" {
+             return 0, nil
+         }
+         return 1, nil
+     }
+     return 0, nil
+ } else {
+     // Re-query to get raw JSON bytes by executing again (since Scan consumed row)
+     row2 := db.QueryRow(cfg.SQL, arg1, arg2)
+     var jsonBytes []byte
+     if err2 := row2.Scan(&jsonBytes); err2 == nil {
+         // print compact JSON
 			// Ensure bytes are valid JSON
 			var v any
 			if err := json.Unmarshal(jsonBytes, &v); err != nil {

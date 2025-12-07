@@ -14,4 +14,7 @@ public class SpecCase {
     public Boolean should_error;
     // Upstream spec provides CLI-style args (e.g., -set, -opts=JSON)
     public java.util.List<String> args;
+    // jd-sql custom extension: optionally select which SQL entrypoint to call
+    // Allowed values: "jd_diff" (default) or "jd_diff_text" for text output
+    public String sql_function;
 }
