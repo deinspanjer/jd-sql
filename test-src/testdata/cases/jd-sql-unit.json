@@ -1,0 +1,20 @@
+[
+  {
+    "name": "unit: equal objects yields empty diff",
+    "description": "jd_diff should return empty text for identical JSON",
+    "category": "jd-sql-unit",
+    "content_a": "{\"a\":1}",
+    "content_b": "{\"a\":1}",
+    "expected_diff": "",
+    "expected_exit": 0
+  },
+  {
+    "name": "unit: simple root change",
+    "description": "jd_diff returns a single root hunk with -/+ lines",
+    "category": "jd-sql-unit",
+    "content_a": "{\"a\":1}",
+    "content_b": "{\"a\":2}",
+    "expected_diff": "@ [\"a\"]\n- 1\n+ 2\n",
+    "expected_exit": 1
+  }
+]

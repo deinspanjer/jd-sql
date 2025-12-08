@@ -73,6 +73,12 @@ Comparison and diff creation
 - `jd_diff_text(a jsonb, b jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS text`
   - Equivalent to `Diff.Render()` in jd native text format. Rendering-only options like `COLOR` may be honored.
 
+- `jd_diff(a jsonb, b jsonb, options jd_option, format jd_diff_format DEFAULT 'jd') RETURNS jsonb`
+  - Format-aware wrapper that returns the diff in one of the supported formats:
+    - `format = 'jd'` → returns a JSON string value containing the jd native structured diff text.
+    - `format = 'patch'` → returns an RFC 6902 JSON Patch (JSON array of operations).
+    - `format = 'merge'` → returns an RFC 7386 Merge Patch (JSON object with fields to set/remove via null).
+
 - `jd_diff_struct(a jsonb, b jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS SETOF jd_diff_element`
   - Structural diff suitable for programmatic inspection.
 
@@ -93,8 +99,7 @@ Patch application
 - `jd_apply_patch(value jsonb, patch jd_patch) RETURNS jsonb`
   - Apply an RFC 6902 JSON Patch to a JSONB value.
 
-- `jd_apply_merge(value jsonb, merge jd_merge) RETURNS jsonb`
-  - Apply an RFC 7386 Merge Patch to a JSONB value.
+Note: Merge patch application helper is not provided in this variant; merge patches are supported for diff output and translation.
 
 Diff parsing and rendering
 
@@ -109,6 +114,16 @@ Diff parsing and rendering
 
 - `jd_render_diff_merge(diff_elements jd_diff_element[]) RETURNS jd_merge`
   - Convert structured diff elements to RFC 7386 Merge Patch.
+
+- `jd_translate_diff_format(diff_content jsonb, input_format jd_diff_format, output_format jd_diff_format) RETURNS jsonb`
+  - Translate a diff representation between formats `jd`, `patch`, and `merge`.
+  - Semantics:
+    - If `input_format = output_format`, the value is returned unchanged.
+    - If either format is `jd`, the jd content is passed/returned as a JSON string value containing the jd native text.
+    - Translations convert via the internal structured diff representation.
+  - Examples:
+    - `select jd_translate_diff_format('"@ [\"a\"]\n+ 1\n"'::jsonb, 'jd', 'patch');`
+    - `select jd_translate_diff_format('[{"op":"add","path":"/a","value":1}]'::jsonb, 'patch', 'jd');`
 
 Render helper
 
@@ -157,55 +172,6 @@ Diff parsing and patching
 Utility
 
 - `_jd_typeof(j jsonb) RETURNS text`
-
-Domains vs composites: rationale
-
-- Options (jd_option) → Domain:
-  - Directly accepts upstream jd option shapes; CHECK constraints provide validation; no composite conversion.
-
-- Path (jd_path) → Domain:
-  - Matches upstream path JSON array; easy to include inside options; validated via CHECK.
-
-- RFC 6902/7386 (jd_patch, jd_merge) → Domains:
-  - Natural JSON forms; interoperable with external tools; validated via CHECK.
-
-- Diff element (jd_diff_element) → Composite:
-  - Convenient for rowset results and SQL joins; uses domains for embedded JSON concepts.
-
-- Metadata (jd_metadata) → Composite:
-  - Future-proof if additional flags are added.
-
-Example DDL snippets (illustrative)
-
-```sql
--- Domains
-create domain jd_option as jsonb
-  check (_jd_validate_options(value));
-
-create domain jd_path as jsonb
-  check (_jd_validate_path(value));
-
-create domain jd_patch as jsonb
-  check (_jd_validate_rfc6902(value));
-
-create domain jd_merge as jsonb
-  check (jsonb_typeof(value) = 'object');
-
--- Composites
-create type jd_metadata as (
-  merge boolean
-);
-
-create type jd_diff_element as (
-  metadata jd_metadata,
-  options  jd_option,
-  path     jd_path,
-  before   jsonb[],
-  remove   jsonb[],
-  add      jsonb[],
-  after    jsonb[]
-);
-```
 
 Examples
 

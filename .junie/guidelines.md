@@ -21,12 +21,16 @@ You are allowed to:
   - Capture the requirements in a test case
   - Write the code to satisfy the requirements
   - Run the test case to ensure the code works as expected
-- MUST pass unit and fuzz tests (implemented using JerrySievert/equinox)
-- Add tests to existing table tests when possible
+- MUST pass java-tests (Gradle subproject) before submitting a PR
+- Add tests to existing test categories when appropriate
 - jd-sql SHOULD maintain compatibility with the original jd project (maintain API backward compatability)
 - Helper functions that are not intended to be used outside of jd-pg SHOULD be prefixed with `_jd_`
-
-  * Unless otherwise instructed
+- SQL scripts (files under `sql/**`) MUST be formatted using the pattern defined in `.editorconfig`
+  - lower case keywords
+  - 4 spaces indentation
+  - significant clauses of a statement on a new line
+  - indented subqueries and compound clauses
+  - one-liner statements MUST NOT exceed 80 characters and should only be used when the statement is short and simple
 
 - Installable SQL scripts (files under `sql/**`) must declare the project license in a leading SQL comment header. Use MIT and reference the root `LICENSE` file, for example:
 
@@ -81,3 +85,28 @@ You are allowed to:
 - IntelliJ derives source and resource roots from Gradle. Avoid manually marking directories in Project Structure; Gradle refresh will overwrite.
 - The `test-src/java-tests` subproject configures extra Test Resources via `sourceSets` so that:
   - `external/jd/spec/test` and `test-src/testdata` appear as Test Resources in the IDE and are on the test runtime classpath.
+
+## Running selected test categories
+
+The java-test suite can filter tests by category using the environment variable `JDSQL_SPEC_CATEGORIES` (comma-separated). The available category names are:
+- jd-sql-unit: simple unit tests for fast verification of correctness
+- jd-core: upstream jd spec core test cases
+- jd-edge_cases: upstream jd spec edge cases
+- jd-errors: upstream jd spec error cases
+- jd-options: upstream jd spec options test cases
+- jd-path_options: upstream jd spec path options test cases
+- jd-format: upstream jd spec format test cases
+- jd-sql-custom: custom tests to be run for any jd-sql engine implementation
+
+### Running a test case using IntelliJ IDEA JUnitRunner
+- class `dev.jdsql.EngineSpecIT`
+- classpath: `jd-sql.test-src.java-tests.test`
+- ENV `JDSQL_SPEC_CATEGORIES=<categories as csv list>`
+
+The run configuration `.idea/runConfigurations/IntelliJ_java_test__core_.xml` is an example of running a single category.
+Tests can be run via gradle task, but the IDE is more convenient for developer review.
+
+Notes
+- If `JDSQL_SPEC_CATEGORIES` is unset or empty, all categories will run.
+- Category normalization is handled by the runner (e.g., upstream names like `core` become `jd-core`).
+- Use this to iterate quickly: start with `jd-sql-unit`, then `jd-core`, then move through the remaining categories.

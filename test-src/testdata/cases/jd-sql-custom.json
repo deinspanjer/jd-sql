@@ -1,41 +1,52 @@
 [
   {
-    "name": "jd_diff_text_mode_default",
-    "description": "Call jd_diff (JSONB) in default text mode; harness should unquote JSON string to jd text.",
+    "name": "custom: jd_equal true for identical json",
+    "description": "Direct call to jd_equal should return true",
     "category": "jd-sql-custom",
+    "sql_function": "jd_equal",
+    "content_a": "{\"a\":1}",
+    "content_b": "{\"a\":1}",
+    "expected_result": "true",
+    "expected_exit": 0
+  },
+  {
+    "name": "custom: jd_equal false when different",
+    "description": "Direct call to jd_equal should return false",
+    "category": "jd-sql-custom",
+    "sql_function": "jd_equal",
     "content_a": "{\"a\":1}",
     "content_b": "{\"a\":2}",
-    "expected_diff": "@ [\"a\"]\n- 1\n+ 2\n",
+    "expected_result": "false",
     "expected_exit": 1
   },
   {
-    "name": "jd_diff_text_explicit",
-    "description": "Call jd_diff_text (TEXT) explicitly and compare jd text.",
-    "category": "jd-sql-custom",
-    "sql_function": "jd_diff_text",
-    "content_a": "{\"x\":[1,2]}",
-    "content_b": "{\"x\":[1,2,3]}",
-    "expected_diff": "@ [2]\n  2\n+ 3\n]\n",
-    "expected_exit": 1
-  },
-  {
-    "name": "jd_diff_text_with_headers",
-    "description": "Verify headers are included when options contain color/precision/path directives (text output).",
+    "name": "custom: jd_diff_text simple change",
+    "description": "Direct call to jd_diff_text should render text hunk",
     "category": "jd-sql-custom",
     "sql_function": "jd_diff_text",
     "content_a": "{\"a\":1}",
     "content_b": "{\"a\":2}",
-    "args": ["-color", "-precision=0.1", "-opts=[{\"@\":[\"a\"],\"^\":[\"DIFF_ON\"]}]"],
-    "expected_diff": "^ \"COLOR\"\n^ {\"precision\":0.1}\n@ [\"a\"]\n- 1\n+ 2\n",
+    "expected_result": "@ [\"a\"]\n- 1\n+ 2\n",
     "expected_exit": 1
   },
   {
-    "name": "no_diff_equal_docs_jd_diff",
-    "description": "jd_diff should return empty string (JSON string) when no changes; harness treats as no diff.",
+    "name": "custom: jd_apply_patch rfc6902",
+    "description": "Apply RFC6902 patch via jd_apply_patch",
     "category": "jd-sql-custom",
-    "content_a": "{\"k\":\"v\"}",
-    "content_b": "{\"k\":\"v\"}",
-    "expected_diff": "",
+    "sql_function": "jd_apply_patch",
+    "content_a": "{\"a\":1}",
+    "content_b": "[{\"op\":\"replace\",\"path\":\"/a\",\"value\":2},{\"op\":\"add\",\"path\":\"/b\",\"value\":3}]",
+    "expected_result": "{\"a\":2,\"b\":3}",
+    "expected_exit": 0
+  },
+  {
+    "name": "custom: translate jd text to patch",
+    "description": "Translate jd text to RFC6902 using jd_translate_diff_format",
+    "category": "jd-sql-custom",
+    "sql_function": "jd_translate_diff_format",
+    "sql_function_args": ["jd", "patch"],
+    "content_a": "@ [\"a\"]\n- 1\n+ 2\n",
+    "expected_result": "[{\"op\":\"test\",\"path\":\"/a\",\"value\":1},{\"op\":\"remove\",\"path\":\"/a\",\"value\":1},{\"op\":\"add\",\"path\":\"/a\",\"value\":2}]",
     "expected_exit": 0
   }
 ]

@@ -197,10 +197,14 @@ public class EngineSpecIT {
                         assertDoesNotThrow(() -> callJdDiff(conn, a, b, options), () -> "SQL should not error for CLI-only case " + c.name);
                     } else {
                         DiffResult diffRes = callDiff(conn, a, b, options, c);
-                        if (c.expected_exit == 0) {
+                        String translate = requestedTranslate(c);
+                        boolean patchMode = containsPatchModeArg(c);
+                        if (translate != null || patchMode) {
+                            // In translate/patch mode, compare actual output to expected_diff even when expected_exit==0
+                            String expected = c.expected_diff == null ? "" : c.expected_diff;
+                            assertEquals(expected.trim(), diffRes.asComparableString().trim(), () -> "Diff mismatch for case " + c.name);
+                        } else if (c.expected_exit == 0) {
                             if (diffRes.isJson) {
-                                // For structured JSON results, consider an empty/falsey structure as no diff.
-                                // Current implementation returns text (JSON string), but be future-proof.
                                 assertEquals("", diffRes.asComparableString().trim(), "Expected no differences");
                             } else {
                                 assertEquals("", diffRes.asComparableString(), "Expected no differences");
@@ -274,14 +278,16 @@ public class EngineSpecIT {
                         org.junit.jupiter.api.Assumptions.assumeTrue(false,
                                 "Skipping yaml_mode: YAML input/output not supported by SQL runner (enable with -Djdsql.enable.yaml=true or JDSQL_ENABLE_YAML=1)");
                     }
+                    // Do not skip jd-sql-custom: these are our explicit jd-sql API cases
+                    // Milestone 7+: RFC format, translation, and patch mode are supported; do not skip them.
                     PostgreSQLContainer<?> pg = containers.get(sqlFile);
                     assertNotNull(pg, "Container not started for " + sqlFile);
                     String url = jdbcUrls.get(sqlFile);
                     try (Connection conn = DriverManager.getConnection(url, pg.getUsername(), pg.getPassword())) {
                         conn.setAutoCommit(true);
 
-                        // sanity: jd_diff exists with options parameter
-                        assertTrue(functionExists(conn, "jd_diff", 3), "jd_diff(a jsonb, b jsonb, options jsonb) must exist");
+                        // sanity: jd_diff exists with 4 args including format parameter
+                        assertTrue(functionExists(conn, "jd_diff", 4), "jd_diff(a jsonb, b jsonb, options jsonb, format jd_diff_format) must exist");
 
                         String a = SpecLoader.normalizeContentForJsonb(c.content_a);
                         String b = SpecLoader.normalizeContentForJsonb(c.content_b);
@@ -298,16 +304,22 @@ public class EngineSpecIT {
                             assertDoesNotThrow(() -> callJdDiff(conn, a, b, options), () -> "SQL should not error for CLI-only case " + c.name);
                         } else {
                             DiffResult diffRes = callDiff(conn, a, b, options, c);
-                            if (c.expected_exit == 0) {
+                            String translate = requestedTranslate(c);
+                            boolean patchMode = containsPatchModeArg(c);
+                            if (translate != null || patchMode) {
+                                String expected = c.expected_diff == null ? "" : c.expected_diff;
+                                assertEquals(expected.trim(), diffRes.asComparableString().trim(), () -> "Diff mismatch for case " + c.name);
+                            } else if (c.expected_exit == 0 && (c.sql_function == null || c.sql_function.isEmpty())) {
                                 if (diffRes.isJson) {
                                     assertEquals("", diffRes.asComparableString().trim(), "Expected no differences");
                                 } else {
                                     assertEquals("", diffRes.asComparableString(), "Expected no differences");
                                 }
                             } else {
-                                String expected = c.expected_diff == null ? null : c.expected_diff;
-                                assertNotNull(expected, "expected_diff must be provided when expected_exit != 0");
-                                assertEquals(expected.trim(), diffRes.asComparableString().trim(), () -> "Diff mismatch for case " + c.name);
+                                // Custom jd-sql cases may assert on expected_result or expected_diff depending on function
+                                String expected = c.expected_result != null ? c.expected_result : c.expected_diff;
+                                assertNotNull(expected, "expected_result or expected_diff must be provided for this case");
+                                assertEquals(expected.trim(), diffRes.asComparableString().trim(), () -> "Result mismatch for case " + c.name);
                             }
                         }
                     }
@@ -508,24 +520,191 @@ public class EngineSpecIT {
     }
 
     private static DiffResult callDiff(Connection conn, String a, String b, String optionsJson, SpecCase c) throws SQLException {
+        // Fast path for jd-sql-custom explicit function calls
+        if (c != null && c.category != null && c.category.equalsIgnoreCase("jd-sql-custom") && c.sql_function != null) {
+            String f = c.sql_function;
+            // Normalize
+            String fn = f.trim().toLowerCase();
+            switch (fn) {
+                case "jd_equal": {
+                    // select jd_equal(a jsonb, b jsonb, options jd_option)
+                    String sql = "select jd_equal(?::jsonb, ?::jsonb, ?::jsonb)";
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
+                        if (b == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, b);
+                        if (optionsJson == null) ps.setNull(3, java.sql.Types.VARCHAR); else ps.setString(3, optionsJson);
+                        try (ResultSet rs = ps.executeQuery()) { rs.next(); boolean val = rs.getBoolean(1); return new DiffResult(true, "", val ? "true" : "false"); }
+                    }
+                }
+                case "jd_diff_text": {
+                    String sql = "select jd_diff_text(?::jsonb, ?::jsonb, ?::jsonb)";
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
+                        if (b == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, b);
+                        if (optionsJson == null) ps.setNull(3, java.sql.Types.VARCHAR); else ps.setString(3, optionsJson);
+                        try (ResultSet rs = ps.executeQuery()) { rs.next(); String s = rs.getString(1); return new DiffResult(false, s == null ? "" : s, null); }
+                    }
+                }
+                case "jd_diff": {
+                    // default to jd format unless provided via args -f
+                    String format = requestedFormat(c);
+                    String sql = "select jd_diff(?::jsonb, ?::jsonb, ?::jsonb, ?::jd_diff_format)";
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
+                        if (b == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, b);
+                        if (optionsJson == null) ps.setNull(3, java.sql.Types.VARCHAR); else ps.setString(3, optionsJson);
+                        ps.setString(4, format == null || format.isEmpty() ? "jd" : format);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            rs.next();
+                            String col = rs.getString(1);
+                            if (col == null) return new DiffResult(true, "", "null");
+                            try { com.fasterxml.jackson.databind.JsonNode n = JSON.readTree(col); String compact = JSON.writeValueAsString(n); return new DiffResult(true, "", compact);} catch (IOException e) { return new DiffResult(false, col, null);} }
+                    }
+                }
+                case "jd_diff_patch": {
+                    String sql = "select jd_diff_patch(?::jsonb, ?::jsonb, ?::jsonb)";
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
+                        if (b == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, b);
+                        if (optionsJson == null) ps.setNull(3, java.sql.Types.VARCHAR); else ps.setString(3, optionsJson);
+                        try (ResultSet rs = ps.executeQuery()) { rs.next(); String col = rs.getString(1); return toJsonResult(col); }
+                    }
+                }
+                case "jd_diff_merge": {
+                    String sql = "select jd_diff_merge(?::jsonb, ?::jsonb, ?::jsonb)";
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
+                        if (b == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, b);
+                        if (optionsJson == null) ps.setNull(3, java.sql.Types.VARCHAR); else ps.setString(3, optionsJson);
+                        try (ResultSet rs = ps.executeQuery()) { rs.next(); String col = rs.getString(1); return toJsonResult(col); }
+                    }
+                }
+                case "jd_patch_text": {
+                    // content_a: value jsonb, content_b: jd diff text
+                    String sql = "select jd_patch_text(?::jsonb, ?::text)";
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
+                        String jdText = c.content_b;
+                        if (jdText == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, jdText);
+                        try (ResultSet rs = ps.executeQuery()) { rs.next(); String col = rs.getString(1); return toJsonResult(col); }
+                    }
+                }
+                case "jd_apply_patch": {
+                    // content_a: value jsonb, content_b: rfc6902 patch jsonb
+                    String sql = "select jd_apply_patch(?::jsonb, ?::jsonb)";
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
+                        if (b == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, b);
+                        try (ResultSet rs = ps.executeQuery()) { rs.next(); String col = rs.getString(1); return toJsonResult(col); }
+                    }
+                }
+                case "jd_translate_diff_format": {
+                    // content_a: diff content (format implied by args - translate), sql_function_args: [input_format, output_format]
+                    java.util.List<String> args = c.sql_function_args;
+                    String inFmt = (args != null && args.size() > 0) ? args.get(0) : "jd";
+                    String outFmt = (args != null && args.size() > 1) ? args.get(1) : "patch";
+                    String payload;
+                    if ("jd".equalsIgnoreCase(inFmt)) {
+                        String raw = c.content_a;
+                        if (raw == null) {
+                            payload = null;
+                        } else {
+                            try {
+                                payload = JSON.writeValueAsString(raw);
+                            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                                String q = raw.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+                                payload = "\"" + q + "\"";
+                            }
+                        }
+                    } else {
+                        payload = a;
+                    }
+                    String sql = "select jd_translate_diff_format(?::jsonb, ?::jd_diff_format, ?::jd_diff_format)";
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        if (payload == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, payload);
+                        ps.setString(2, inFmt);
+                        ps.setString(3, outFmt);
+                        try (ResultSet rs = ps.executeQuery()) { rs.next(); String col = rs.getString(1); return toJsonResult(col); }
+                    }
+                }
+                default:
+                    // fall-through to generic diff handling below
+                    break;
+            }
+        }
+
         boolean useText = false;
         if (c != null && c.category != null && c.category.equalsIgnoreCase("jd-sql-custom")) {
             if (c.sql_function != null && c.sql_function.equalsIgnoreCase("jd_diff_text")) {
                 useText = true;
             }
         }
-
+        // Detect requested output format via -f flag (default jd)
+        String format = requestedFormat(c);
+        String translate = requestedTranslate(c);
+        boolean patchMode = containsPatchModeArg(c);
         String func = useText ? "jd_diff_text" : "jd_diff";
         // Ensure function exists
         if (useText) {
             assertTrue(functionExists(conn, "jd_diff_text", 3), "jd_diff_text must exist when requested by jd-sql-custom case");
         }
 
-        String sql = "select " + func + "(?::jsonb, ?::jsonb, ?::jsonb)";
+        String sql;
+        if (!useText && patchMode) {
+            // Patch mode: apply jd diff text (content_a) to document (content_b)
+            sql = "select jd_patch_text(?::jsonb, ?::text)";
+        } else if (!useText && translate != null) {
+            // translation mode: single arg + formats
+            sql = "select jd_translate_diff_format(?::jsonb, ?::jd_diff_format, ?::jd_diff_format)";
+        } else if (!useText) {
+            // 4-arg jd_diff with explicit format (default jd)
+            sql = "select jd_diff(?::jsonb, ?::jsonb, ?::jsonb, ?::jd_diff_format)";
+        } else {
+            sql = "select jd_diff_text(?::jsonb, ?::jsonb, ?::jsonb)";
+        }
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
-            if (b == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, b);
-            if (optionsJson == null) ps.setNull(3, java.sql.Types.VARCHAR); else ps.setString(3, optionsJson);
+            if (!useText && patchMode) {
+                // param1: base document (b), param2: jd text (a) as raw text
+                if (b == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, b);
+                // Use original content_a without JSON normalization for jd text
+                String jdText = c.content_a == null ? null : c.content_a;
+                if (jdText == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, jdText);
+            } else if (!useText && translate != null) {
+                // In translate mode, content_a carries diff content; options unused
+                String[] f = translate.split("2", 2);
+                String inFmt = f[0];
+                // Determine payload for param1 based on input format
+                String payload;
+                if ("jd".equals(inFmt)) {
+                    // Wrap jd text as a JSON string value using Jackson for correctness
+                    String raw = c.content_a == null ? null : c.content_a;
+                    if (raw == null) {
+                        payload = null;
+                    } else {
+                        try {
+                            payload = JSON.writeValueAsString(raw);
+                        } catch (Exception ex) {
+                            // Fallback minimal escaping
+                            String q = raw.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+                            payload = "\"" + q + "\"";
+                        }
+                    }
+                } else {
+                    payload = a; // already normalized JSON
+                }
+                if (payload == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, payload);
+                ps.setString(2, f[0]);
+                ps.setString(3, f[1]);
+            } else if (!useText) {
+                if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
+                if (b == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, b);
+                if (optionsJson == null) ps.setNull(3, java.sql.Types.VARCHAR); else ps.setString(3, optionsJson);
+                ps.setString(4, format == null || format.isEmpty() ? "jd" : format);
+            } else {
+                if (a == null) ps.setNull(1, java.sql.Types.VARCHAR); else ps.setString(1, a);
+                if (b == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, b);
+                if (optionsJson == null) ps.setNull(3, java.sql.Types.VARCHAR); else ps.setString(3, optionsJson);
+            }
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 String col = rs.getString(1);
@@ -551,6 +730,80 @@ public class EngineSpecIT {
                 }
             }
         }
+    }
+
+    private static DiffResult toJsonResult(String col) throws SQLException {
+        if (col == null) return new DiffResult(true, "", "null");
+        try {
+            com.fasterxml.jackson.databind.JsonNode n = JSON.readTree(col);
+            if (n == null || n.isNull()) return new DiffResult(true, "", "null");
+            if (n.isTextual()) return new DiffResult(true, n.asText(), null);
+            String compact = JSON.writeValueAsString(n);
+            return new DiffResult(true, "", compact);
+        } catch (IOException e) {
+            return new DiffResult(false, col, null);
+        }
+    }
+
+    private static boolean containsNonJdFormatArg(SpecCase c) {
+        if (c == null || c.args == null) return false;
+        for (String arg : c.args) {
+            if (arg == null) continue;
+            if (arg.startsWith("-f=")) {
+                String v = arg.substring(3).trim().toLowerCase();
+                if (!v.isEmpty() && !v.equals("jd")) return true;
+            }
+            if (arg.equals("-f") || arg.equals("--format")) {
+                // no positional support in upstream spec JSON; ignore
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsTranslateArg(SpecCase c) {
+        if (c == null || c.args == null) return false;
+        for (String arg : c.args) {
+            if (arg == null) continue;
+            if (arg.startsWith("-t=") || arg.startsWith("--translate=")) return true;
+        }
+        return false;
+    }
+
+    private static boolean containsPatchModeArg(SpecCase c) {
+        if (c == null || c.args == null) return false;
+        for (String arg : c.args) {
+            if (arg == null) continue;
+            if (arg.equals("-p")) return true;
+        }
+        return false;
+    }
+
+    private static String requestedFormat(SpecCase c) {
+        if (c == null || c.args == null) return "jd";
+        for (String arg : c.args) {
+            if (arg == null) continue;
+            if (arg.startsWith("-f=")) {
+                String v = arg.substring(3).trim().toLowerCase();
+                if (v.equals("jd") || v.equals("patch") || v.equals("merge")) return v;
+            } else if (arg.startsWith("--format=")) {
+                String v = arg.substring("--format=".length()).trim().toLowerCase();
+                if (v.equals("jd") || v.equals("patch") || v.equals("merge")) return v;
+            }
+        }
+        return "jd";
+    }
+
+    private static String requestedTranslate(SpecCase c) {
+        if (c == null || c.args == null) return null;
+        for (String arg : c.args) {
+            if (arg == null) continue;
+            if (arg.startsWith("-t=")) {
+                return arg.substring(3).trim().toLowerCase();
+            } else if (arg.startsWith("--translate=")) {
+                return arg.substring("--translate=".length()).trim().toLowerCase();
+            }
+        }
+        return null;
     }
 
     private static String buildOptionsJson(SpecCase c) {

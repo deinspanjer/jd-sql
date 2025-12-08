@@ -15,9 +15,9 @@ import (
 )
 
 type Config struct {
-	Engine string `yaml:"engine"`
-	DSN    string `yaml:"dsn"`
-	SQL    string `yaml:"sql"`
+    Engine string `yaml:"engine"`
+    DSN    string `yaml:"dsn"`
+    SQL    string `yaml:"sql"`
 }
 
 func main() {
@@ -35,34 +35,40 @@ func run() (int, error) {
         return 2, err
     }
 
-	cfg, err := loadConfig(cfgPath)
+    cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		return 2, err
 	}
 
 	switch strings.ToLower(cfg.Engine) {
 	case "postgres", "pg":
-		return runPostgres(cfg, fileA, fileB)
-	default:
-		return 2, fmt.Errorf("unsupported engine '%s' (supported: postgres)", cfg.Engine)
-	}
+        return runPostgres(cfg, fileA, fileB)
+    default:
+        return 2, fmt.Errorf("unsupported engine '%s' (supported: postgres)", cfg.Engine)
+    }
 }
 
+// parseArgs now also parses -f/--format and -t/--translate but only returns cfg path and files here;
+// flags are accessed later via package flag.
 func parseArgs() (cfgPath string, fileA string, fileB string, err error) {
-    // Primary parser (compatible with -c/--config); ignore unknown flags by parsing manually.
+    // Define flag holders to capture known flags but ignore usage here
     var configFlag string
+    var _format string
+    var _translate string
     fs := flag.NewFlagSet("jd-sql-spec-runner", flag.ContinueOnError)
-    fs.SetOutput(new(nopWriter)) // silence default usage output on error
+    fs.SetOutput(new(nopWriter))
     fs.StringVar(&configFlag, "c", "", "config file")
     fs.StringVar(&configFlag, "config", "", "config file")
+    fs.StringVar(&_format, "f", "", "diff/patch format: jd|patch|merge")
+    fs.StringVar(&_format, "format", "", "diff/patch format: jd|patch|merge")
+    fs.StringVar(&_translate, "t", "", "translate: <in>2<out> (e.g., jd2patch)")
+    fs.StringVar(&_translate, "translate", "", "translate: <in>2<out> (e.g., jd2merge)")
     _ = fs.Parse(os.Args[1:])
 
-    // Remaining args may include jd flags; the upstream runner may prepend flags and arbitrary args.
     raw := os.Args[1:]
-    // Remove config flags from view
     raw = stripConfigArgs(raw)
 
-    // Collect positional (non-flag) args only
+    // collect positional args (files)
     pos := make([]string, 0, len(raw))
     for _, s := range raw {
         if strings.HasPrefix(s, "-") {
@@ -71,9 +77,13 @@ func parseArgs() (cfgPath string, fileA string, fileB string, err error) {
         pos = append(pos, s)
     }
 
-    // Enforce exactly two positional inputs for diff mode
+    // Default: expect two files; if translate flag provided and only one file, allow single input
+    if len(pos) == 1 {
+        // In translate mode, the single input is the diff content; set B empty
+        return resolveConfigPath(configFlag), pos[0], "", nil
+    }
     if len(pos) < 2 {
-        // Try permissive parse from environment
+        // fallback to env
         configFlag2, a, b, perr := permissiveParseEnvArgs()
         if perr != nil {
             return "", "", "", errors.New("missing input files (expected two file paths)")
@@ -81,7 +91,6 @@ func parseArgs() (cfgPath string, fileA string, fileB string, err error) {
         if configFlag == "" {
             configFlag = configFlag2
         }
-        // Validate existence
         if err := ensureFilesExist(a, b); err != nil {
             return "", "", "", err
         }
@@ -90,7 +99,6 @@ func parseArgs() (cfgPath string, fileA string, fileB string, err error) {
     if len(pos) > 2 {
         return "", "", "", errors.New("too many input files (expected two)")
     }
-
     a := pos[len(pos)-2]
     b := pos[len(pos)-1]
     if err := ensureFilesExist(a, b); err != nil {
@@ -253,28 +261,49 @@ func runPostgres(cfg Config, fileA, fileB string) (int, error) {
 	}
 	defer db.Close()
 
-	// Prepare statement
-	stmt, err := db.Prepare(cfg.SQL)
-	if err != nil {
-		return 2, fmt.Errorf("prepare SQL failed: %w", err)
-	}
-	defer stmt.Close()
+ // Determine mode based on flags
+ format := getFormatFlag()
+ translateIn, translateOut := getTranslateFlag()
 
-	// Bind parameters: use nil to represent SQL NULL (void), otherwise pass raw JSON text.
-	var arg1 any
-	if aIsNull {
-		arg1 = nil
-	} else {
-		arg1 = string(aText)
-	}
-	var arg2 any
-	if bIsNull {
-		arg2 = nil
-	} else {
-		arg2 = string(bText)
-	}
+ var sqlText string
+ var args []any
+ if translateIn != "" {
+     // Translate mode: use fileA as diff content
+     sqlText = "SELECT jd_translate_diff_format($1::jsonb, $2::jd_diff_format, $3::jd_diff_format)"
+     // Read A text (already read above as aText); if empty, pass NULL
+     var arg1 any
+     if aIsNull {
+         arg1 = nil
+     } else {
+         arg1 = string(aText)
+     }
+     args = []any{arg1, translateIn, translateOut}
+ } else {
+     // Diff mode: 4-arg jd_diff, include options as NULL and format param
+     sqlText = "SELECT jd_diff($1::jsonb, $2::jsonb, NULL::jsonb, $3::jd_diff_format)"
+     var arg1 any
+     if aIsNull {
+         arg1 = nil
+     } else {
+         arg1 = string(aText)
+     }
+     var arg2 any
+     if bIsNull {
+         arg2 = nil
+     } else {
+         arg2 = string(bText)
+     }
+     args = []any{arg1, arg2, format}
+ }
 
-	row := stmt.QueryRow(arg1, arg2)
+ // Prepare statement
+ stmt, err := db.Prepare(sqlText)
+ if err != nil {
+     return 2, fmt.Errorf("prepare SQL failed: %w", err)
+ }
+ defer stmt.Close()
+
+ row := stmt.QueryRow(args...)
 
  // Try text first
  var textOut sql.NullString
@@ -312,15 +341,15 @@ func runPostgres(cfg Config, fileA, fileB string) (int, error) {
      return 0, nil
  } else {
      // Re-query to get raw JSON bytes by executing again (since Scan consumed row)
-     row2 := db.QueryRow(cfg.SQL, arg1, arg2)
+     row2 := db.QueryRow(sqlText, args...)
      var jsonBytes []byte
      if err2 := row2.Scan(&jsonBytes); err2 == nil {
          // print compact JSON
-			// Ensure bytes are valid JSON
-			var v any
-			if err := json.Unmarshal(jsonBytes, &v); err != nil {
-				// Treat as text
-				s := string(jsonBytes)
+ 			// Ensure bytes are valid JSON
+ 			var v any
+ 			if err := json.Unmarshal(jsonBytes, &v); err != nil {
+ 				// Treat as text
+ 				s := string(jsonBytes)
 				fmt.Fprint(os.Stdout, s)
 				if strings.TrimSpace(s) == "" {
 					return 0, nil
@@ -337,6 +366,65 @@ func runPostgres(cfg Config, fileA, fileB string) (int, error) {
 		// If both scans fail, return error
 		return 2, fmt.Errorf("unsupported result type in first column; expected text or json")
 	}
+}
+
+func getFormatFlag() string {
+    // default jd
+    var fShort, fLong string
+    for _, a := range os.Args[1:] {
+        if strings.HasPrefix(a, "-f=") {
+            fShort = strings.TrimPrefix(a, "-f=")
+        } else if a == "-f" {
+            // next token
+            // handled below by scanning again in order
+        } else if strings.HasPrefix(a, "--format=") {
+            fLong = strings.TrimPrefix(a, "--format=")
+        }
+    }
+    // second pass for -f value
+    for i := 0; i < len(os.Args)-1; i++ {
+        if os.Args[i] == "-f" && !strings.HasPrefix(os.Args[i+1], "-") {
+            fShort = os.Args[i+1]
+            break
+        }
+    }
+    v := strings.TrimSpace(strings.ToLower(coalesceNonEmpty(fShort, fLong)))
+    if v == "" {
+        return "jd"
+    }
+    switch v {
+    case "jd", "patch", "merge":
+        return v
+    default:
+        return "jd"
+    }
+}
+
+func getTranslateFlag() (inFmt string, outFmt string) {
+    var t string
+    for _, a := range os.Args[1:] {
+        if strings.HasPrefix(a, "-t=") {
+            t = strings.TrimPrefix(a, "-t=")
+        } else if strings.HasPrefix(a, "--translate=") {
+            t = strings.TrimPrefix(a, "--translate=")
+        }
+    }
+    if t == "" {
+        return "", ""
+    }
+    // expect pattern X2Y
+    parts := strings.SplitN(t, "2", 2)
+    if len(parts) != 2 {
+        return "", ""
+    }
+    return strings.ToLower(parts[0]), strings.ToLower(parts[1])
+}
+
+func coalesceNonEmpty(a, b string) string {
+    if strings.TrimSpace(a) != "" {
+        return a
+    }
+    return b
 }
 
 func toJSONB(v any) any { return v }

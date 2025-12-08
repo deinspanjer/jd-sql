@@ -45,29 +45,21 @@ public class SpecLoader {
     }
 
     public static List<SpecCase> loadProjectCases() throws IOException {
-        // Allow project-specific cases in either location (both optional):
-        // 1) test resources under the java-tests subproject
-        // 2) shared testdata area used by multiple runners
-        Path casesDirA = projectRoot().resolve("test-src/java-tests/src/test/resources/jd-sql/cases");
-        Path casesDirB = projectRoot().resolve("test-src/testdata/cases");
-        List<Path> roots = new ArrayList<>();
-        if (Files.isDirectory(casesDirA)) roots.add(casesDirA);
-        if (Files.isDirectory(casesDirB)) roots.add(casesDirB);
-        if (roots.isEmpty()) return List.of();
+        // Canonical location for jd-sql project-specific cases
+        Path casesDir = projectRoot().resolve("test-src/testdata/cases");
+        if (!Files.isDirectory(casesDir)) return List.of();
 
+        List<Path> files;
+        try (Stream<Path> s = Files.list(casesDir)) {
+            files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
+                    .sorted()
+                    .toList();
+        }
         List<SpecCase> out = new ArrayList<>();
-        for (Path root : roots) {
-            List<Path> files;
-            try (Stream<Path> s = Files.list(root)) {
-                files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
-                        .sorted()
-                        .toList();
-            }
-            for (Path f : files) {
-                List<SpecCase> batch = MAPPER.readValue(f.toFile(), new TypeReference<>() {
-                });
-                out.addAll(batch);
-            }
+        for (Path f : files) {
+            List<SpecCase> batch = MAPPER.readValue(f.toFile(), new com.fasterxml.jackson.core.type.TypeReference<>() {
+            });
+            out.addAll(batch);
         }
         return out;
     }

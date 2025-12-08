@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="IntelliJ java test (core,options)" type="JUnit" factoryName="JUnit">
+  <configuration default="false" name="IntelliJ java test (prompt for categories)" type="JUnit" factoryName="JUnit">
     <module name="jd-sql.test-src.java-tests.test" />
     <extension name="software.aws.toolkits.jetbrains.core.execution.JavaAwsConnectionExtension">
       <option name="credential" />
@@ -10,9 +10,7 @@
     <option name="MAIN_CLASS_NAME" value="dev.jdsql.EngineSpecIT" />
     <option name="METHOD_NAME" value="" />
     <option name="TEST_OBJECT" value="class" />
-    <envs>
-      <env name="JDSQL_SPEC_CATEGORIES" value="jd-core,jd-options" />
-    </envs>
+    <option name="VM_PARAMETERS" value="-ea -Djdsql.spec.categories=$Prompt:Enter comma separated list of categories to run$" />
     <method v="2">
       <option name="Make" enabled="true" />
     </method>
