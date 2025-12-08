@@ -1,1147 +1,1741 @@
--- jd_pg_plpgsql.sql
+-- PostgreSQL PL/pgSQL implementation surface for jd-sql (PL/pgSQL variant).
 --
 -- License: MIT
 -- This file is licensed under the MIT License. See the LICENSE file at
 -- github.com/deinspanjer/jd-sql/LICENSE for full license text.
 --
 -- Copyright (c) 2025 Daniel Einspanjer
---
---
--- Pure PL/pgSQL helpers and entrypoints for jd-sql, a SQL-focused port inspired by
--- the jd project (https://github.com/josephburnett/jd). This initial version
--- focuses on top-level JSONB object diffs and patches using built-in PostgreSQL
--- functionality only (no plv8 integration).
---
--- Scope and compatibility notes:
--- - The jd project defines a rich, human-readable diff format and multiple
---   translation modes. This file provides a pragmatic first step for jd-sql
---   by implementing a small subset that is useful and testable inside Postgres:
---     • Top-level object key adds/removes/replaces
---     • Root scalar replace and array core cases with simple context
--- - The primary output is a jd v2-style textual diff (lines starting with ^, @, -, +, or space).
--- - A simple patcher is also provided which applies a simplified operation array format.
--- - Future versions will expand coverage towards full jd compatibility.
---
--- Installation:
---   \i sql/jd_pg_plpgsql.sql
---
--- Usage:
---   SELECT jd_diff('{"a":1}'::jsonb, '{"a":2,"b":3}'::jsonb, NULL);
---   SELECT jd_diff('{"a":1}'::jsonb, '{"a":2,"b":3}'::jsonb, '[{"@":[],"^":["DIFF_ON"]}]');
---   SELECT jd_patch('{"a":1}'::jsonb, '[{"op":"replace","path":["a"],"value":2},{"op":"add","path":["b"],"value":3}]', NULL);
---
 
-CREATE OR REPLACE FUNCTION _jd_is_scalar(j jsonb)
-RETURNS boolean
-LANGUAGE sql
-IMMUTABLE
-AS $$
-  SELECT jsonb_typeof($1) IN ('string','number','boolean','null');
+-- --------------------------------------------------------------------------------
+-- Drop existing objects (dev-friendly)
+-- --------------------------------------------------------------------------------
+do
+$$
+    begin
+        if exists (select 1
+                   from pg_type
+                   where typname = 'jd_diff_element') then
+            execute 'drop type jd_diff_element cascade';
+        end if;
+    end
+$$;
+do
+$$
+    begin
+        if exists (select 1
+                   from pg_type
+                   where typname = 'jd_metadata') then
+            execute 'drop type jd_metadata cascade';
+        end if;
+    end
+$$;
+do
+$$
+    begin
+        if exists (select 1
+                   from pg_type
+                   where typname = 'jd_option') then
+            execute 'drop domain jd_option cascade';
+        end if;
+    end
+$$;
+do
+$$
+    begin
+        if exists (select 1
+                   from pg_type
+                   where typname = 'jd_path') then
+            execute 'drop domain jd_path cascade';
+        end if;
+    end
+$$;
+do
+$$
+    begin
+        if exists (select 1
+                   from pg_type
+                   where typname = 'jd_patch') then
+            execute 'drop domain jd_patch cascade';
+        end if;
+    end
+$$;
+do
+$$
+    begin
+        if exists (select 1
+                   from pg_type
+                   where typname = 'jd_merge') then
+            execute 'drop domain jd_merge cascade';
+        end if;
+    end
+$$;
+do
+$$
+    begin
+        if exists (select 1
+                   from pg_type
+                   where typname = 'jd_diff_format') then
+            execute 'drop type jd_diff_format cascade';
+        end if;
+    end
 $$;
 
-COMMENT ON FUNCTION _jd_is_scalar(jsonb) IS 'Internal helper: returns true if the jsonb value is a scalar (string, number, boolean, or null).';
-
-
-CREATE OR REPLACE FUNCTION _jd_path_text(path jsonb)
-RETURNS text
-LANGUAGE sql
-IMMUTABLE
-AS $$
-  SELECT COALESCE(string_agg(elem::text, '.'), '')
-  FROM jsonb_array_elements_text(COALESCE(path, '[]'::jsonb)) AS e(elem);
+-- --------------------------------------------------------------------------------
+-- Validators
+-- --------------------------------------------------------------------------------
+create or replace function _jd_validate_options(options jsonb) returns boolean
+    language plpgsql
+    immutable as
+$$
+begin
+    -- Initial milestone: be permissive; accept any JSON array as options.
+    if options is null then return false; end if;
+    return jsonb_typeof(options) = 'array';
+end
 $$;
 
-COMMENT ON FUNCTION _jd_path_text(jsonb) IS 'Internal helper: converts a JSON array path (of text keys) into a dotted text path for messages.';
-
-
--- Render helpers
-CREATE OR REPLACE FUNCTION _jd_render_value(j jsonb)
-RETURNS text
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  t text := CASE WHEN j IS NULL THEN 'void' ELSE jsonb_typeof(j) END;
-  out text := '';
-  i int;
-  n int;
-  k text;
-  v jsonb;
-  first boolean;
-  num numeric;
-BEGIN
-  -- SQL NULL indicates no value (should not normally occur for real JSON values)
-  IF j IS NULL THEN
-    RETURN '';
-  END IF;
-
-  IF t = 'object' THEN
-    out := '{';
-    first := true;
-    -- Deterministic key order for stable rendering
-    FOR k, v IN
-      SELECT key, value FROM jsonb_each(j) ORDER BY key
-    LOOP
-      IF NOT first THEN
-        out := out || ',';
-      END IF;
-      -- Use to_jsonb(k)::text to ensure proper JSON string quoting for keys
-      out := out || to_jsonb(k)::text || ':' || _jd_render_value(v);
-      first := false;
-    END LOOP;
-    out := out || '}';
-    RETURN out;
-  ELSIF t = 'array' THEN
-    out := '[';
-    n := COALESCE(jsonb_array_length(j), 0);
-    i := 0;
-    WHILE i < n LOOP
-      IF i > 0 THEN
-        out := out || ',';
-      END IF;
-      out := out || _jd_render_value(j->i);
-      i := i + 1;
-    END LOOP;
-    out := out || ']';
-    RETURN out;
-  ELSE
-    -- Scalars: Render numbers without trailing .0 when integral; otherwise use jsonb::text
-    IF t = 'number' THEN
-      -- Render numeric in minimal JSON form: trim trailing zeros after decimal
-      -- Start from the textual representation to preserve exponent forms
-      out := j#>>'{}';
-      -- If it looks like a plain decimal (no exponent), trim trailing zeros and possible trailing dot
-      IF position('e' in lower(out)) = 0 AND position('E' in out) = 0 THEN
-        IF position('.' in out) > 0 THEN
-          -- Remove trailing zeros
-          WHILE right(out, 1) = '0' LOOP
-            out := left(out, length(out)-1);
-          END LOOP;
-          -- If a trailing dot remains, remove it
-          IF right(out, 1) = '.' THEN
-            out := left(out, length(out)-1);
-          END IF;
-        END IF;
-      END IF;
-      RETURN out;
-    ELSE
-      -- For non-number scalars (string/boolean/null): Postgres jsonb::text is compact and correct
-      RETURN j::text;
-    END IF;
-  END IF;
-END;
+create or replace function _jd_validate_path(path jsonb) returns boolean
+    language plpgsql
+    immutable as
+$$
+declare
+    elem jsonb;
+    t    text;
+begin
+    if path is null or jsonb_typeof(path) <> 'array' then return false; end if;
+    for elem in select e from jsonb_array_elements(path) as z(e)
+        loop
+            t := jsonb_typeof(elem);
+            if t in ('string', 'number') then continue; end if;
+            if t = 'object' then continue; end if;
+            if t = 'array' then
+                if jsonb_array_length(elem) = 0 then continue; end if;
+                if jsonb_array_length(elem) = 1 and jsonb_typeof(elem -> 0) = 'object' then continue; end if;
+                return false;
+            end if;
+            return false;
+        end loop;
+    return true;
+end
 $$;
 
-COMMENT ON FUNCTION _jd_render_value(jsonb) IS 'Internal helper: compact JSON rendering for values (jsonb::text). Returns empty string for SQL NULL (void).';
-
-
-CREATE OR REPLACE FUNCTION _jd_render_path(path jsonb)
-RETURNS text
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  out text := '[';
-  i int := 0;
-  n int := COALESCE(jsonb_array_length(path), 0);
-  v jsonb;
-BEGIN
-  WHILE i < n LOOP
-    v := path->i;
-    IF i > 0 THEN
-      out := out || ',';
-    END IF;
-    -- Render compactly: for objects/arrays use _jd_render_value to avoid spaces
-    IF jsonb_typeof(v) IN ('object','array') THEN
-      out := out || _jd_render_value(v);
-    ELSE
-      -- v::text renders valid JSON scalars (strings quoted, numbers plain)
-      out := out || v::text;
-    END IF;
-    i := i + 1;
-  END LOOP;
-  out := out || ']';
-  RETURN out;
-END;
+create or replace function _jd_validate_rfc6902(patch jsonb) returns boolean
+    language plpgsql
+    immutable as
+$$
+declare
+    op jsonb;
+    o  text;
+begin
+    if patch is null or jsonb_typeof(patch) <> 'array' then return false; end if;
+    for op in select e from jsonb_array_elements(patch) as z(e)
+        loop
+            if jsonb_typeof(op) <> 'object' then return false; end if;
+            o := op ->> 'op';
+            if o not in ('add', 'remove', 'replace', 'move', 'copy', 'test') then return false; end if;
+            if (o in ('add', 'replace', 'test')) and not (op ? 'value') then return false; end if;
+            if not (op ? 'path') then return false; end if;
+        end loop;
+    return true;
+end
 $$;
 
-COMMENT ON FUNCTION _jd_render_path(jsonb) IS 'Internal helper: render a JSONB path array as jd path string (e.g., ["a",1]).';
+-- --------------------------------------------------------------------------------
+-- Domains and Types
+-- --------------------------------------------------------------------------------
+create domain jd_option as jsonb check (value is null or _jd_validate_options(value));
+create domain jd_path as jsonb check (value is null or _jd_validate_path(value));
+create domain jd_patch as jsonb check (value is null or _jd_validate_rfc6902(value));
+create domain jd_merge as jsonb check (value is null or jsonb_typeof(value) = 'object');
 
+-- diff format enum (Milestone 6)
+create type jd_diff_format as enum ('jd','patch','merge');
 
-CREATE OR REPLACE FUNCTION _jd_path_append(path jsonb, elem jsonb)
-RETURNS jsonb
-LANGUAGE sql
-IMMUTABLE
-AS $$
-  SELECT COALESCE($1,'[]'::jsonb) || jsonb_build_array($2);
+create type jd_metadata as
+(
+    merge boolean
+);
+
+create type jd_diff_element as
+(
+    metadata jd_metadata,
+    options  jd_option,
+    path     jd_path,
+    before   jsonb[],
+    remove   jsonb[],
+    add      jsonb[],
+    after    jsonb[]
+);
+
+-- --------------------------------------------------------------------------------
+-- Helpers
+-- --------------------------------------------------------------------------------
+create or replace function _jd_render_json_compact(j jsonb) returns text
+    language plpgsql
+    immutable as
+$$
+declare
+    t   text;
+    out text;
+begin
+    -- normalize numbers: strip trailing .0 and zeros by casting to numeric then to text
+    if j is null then return 'null'; end if;
+    if jsonb_typeof(j) = 'number' then
+        t := j::text;
+        if position('.' in t) > 0 then t := rtrim(rtrim(t, '0'), '.'); end if;
+        return t;
+    end if;
+    -- For non-numbers, render compactly (no spaces after ':' or ',')
+    out := j::text;
+    out := replace(replace(out, ': ', ':'), ', ', ',');
+    return out;
+end
 $$;
 
-COMMENT ON FUNCTION _jd_path_append(jsonb, jsonb) IS 'Internal helper: append an element to a JSONB array path.';
-
-
--- Numeric closeness check to handle floating point representation edge cases
-CREATE OR REPLACE FUNCTION _jd_numbers_close(a jsonb, b jsonb)
-RETURNS boolean
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  na numeric;
-  nb numeric;
-  diff numeric;
-  eps numeric := 1e-15;
-BEGIN
-  IF a IS NULL OR b IS NULL THEN
-    RETURN false;
-  END IF;
-  IF jsonb_typeof(a) <> 'number' OR jsonb_typeof(b) <> 'number' THEN
-    RETURN false;
-  END IF;
-  -- Cast textual representation to numeric; handle scientific notation as well
-  na := (a#>>'{}')::numeric;
-  nb := (b#>>'{}')::numeric;
-  diff := abs(na - nb);
-  -- Use absolute epsilon for core tests; could extend to relative in future
-  RETURN diff <= eps;
-END;
+-- option helpers
+create or replace function _jd_option_has(options jd_option, name text) returns boolean
+    language sql
+    immutable as
+$$
+select exists (select 1
+               from jsonb_array_elements(coalesce($1, '[]'::jsonb)) as z(e)
+               where (jsonb_typeof(e) = 'string' and e::text = to_jsonb($2)::text)
+                  or (jsonb_typeof(e) = 'object' and (e ? lower($2) or e ? $2)))
 $$;
 
-COMMENT ON FUNCTION _jd_numbers_close(jsonb, jsonb) IS 'Internal helper: returns true if two jsonb numbers are within a small epsilon.';
-
-
--- Options helpers
--- Determine if prefix is a prefix of path (both jsonb arrays)
-CREATE OR REPLACE FUNCTION _jd_path_is_prefix(path jsonb, prefix jsonb)
-RETURNS boolean
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  lp int := COALESCE(jsonb_array_length(prefix), 0);
-  lpath int := COALESCE(jsonb_array_length(path), 0);
-  i int := 0;
-BEGIN
-  IF lp = 0 THEN
-    RETURN true;
-  END IF;
-  IF lp > lpath THEN
-    RETURN false;
-  END IF;
-  WHILE i < lp LOOP
-    IF (path->i) IS DISTINCT FROM (prefix->i) THEN
-      RETURN false;
-    END IF;
-    i := i + 1;
-  END LOOP;
-  RETURN true;
-END;
+create or replace function _jd_option_get_setkeys(options jd_option) returns text[]
+    language plpgsql
+    immutable as
+$$
+declare
+    e   jsonb;
+    out text[] := array []::text[];
+    arr jsonb;
+    i   int;
+begin
+    for e in select x from jsonb_array_elements(coalesce(options, '[]'::jsonb)) as t(x)
+        loop
+            if jsonb_typeof(e) = 'object' and (e ? 'setkeys') then
+                arr := e -> 'setkeys';
+                if jsonb_typeof(arr) = 'array' then
+                    i := 0;
+                    while i < jsonb_array_length(arr)
+                        loop
+                            out := out || (arr ->> i);
+                            i := i + 1;
+                        end loop;
+                end if;
+            end if;
+        end loop;
+    if array_length(out, 1) is null then return null; end if;
+    return out;
+end
 $$;
 
-COMMENT ON FUNCTION _jd_path_is_prefix(jsonb, jsonb) IS 'Internal helper: true if prefix jsonb array is a prefix of path array.';
-
-
-CREATE OR REPLACE FUNCTION _jd_apply_option_dir(dir jsonb, diffing_on boolean, eps numeric, set_mode boolean, setkeys jsonb, multiset_mode boolean, color_mode boolean)
-RETURNS TABLE(new_diffing_on boolean, new_eps numeric, new_set_mode boolean, new_setkeys jsonb, new_multiset boolean, new_color boolean)
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  t text := jsonb_typeof(dir);
-  key text;
-  val jsonb;
-  out_diffing_on boolean := diffing_on;
-  out_eps numeric := eps;
-  out_set boolean := set_mode;
-  out_setkeys jsonb := setkeys; -- jsonb array of strings or null
-  out_multiset boolean := multiset_mode;
-  out_color boolean := color_mode;
-BEGIN
-  IF t = 'string' THEN
-    IF dir#>>'{}' = 'DIFF_ON' THEN
-      out_diffing_on := true;
-    ELSIF dir#>>'{}' = 'DIFF_OFF' THEN
-      out_diffing_on := false;
-    ELSIF dir#>>'{}' = 'SET' THEN
-      out_set := true;
-    ELSIF dir#>>'{}' = 'MULTISET' THEN
-      out_multiset := true;
-    ELSIF dir#>>'{}' = 'COLOR' THEN
-      out_color := true;
-    END IF;
-  ELSIF t = 'object' THEN
-    IF dir ? 'precision' THEN
-      out_eps := (dir->>'precision')::numeric;
-    END IF;
-    IF dir ? 'setkeys' THEN
-      -- Accept only valid array of strings; ignore otherwise
-      IF jsonb_typeof(dir->'setkeys') = 'array' THEN
-        out_setkeys := dir->'setkeys';
-      END IF;
-    END IF;
-  END IF;
-  RETURN QUERY SELECT out_diffing_on, out_eps, out_set, out_setkeys, out_multiset, out_color;
-END;
+create or replace function _jd_object_identity(v jsonb, setkeys text[]) returns jsonb
+    language plpgsql
+    immutable as
+$$
+declare
+    ident jsonb := '{}'::jsonb;
+    k     text;
+begin
+    if v is null or jsonb_typeof(v) <> 'object' then return null; end if;
+    if setkeys is null or array_length(setkeys, 1) is null then return null; end if;
+    -- ensure deterministic key order: sort keys lexicographically
+    for k in select keyname from unnest(setkeys) as t(keyname) order by 1
+        loop
+            ident := jsonb_set(ident, array [k], v -> k, true);
+        end loop;
+    return ident;
+end
 $$;
 
-COMMENT ON FUNCTION _jd_apply_option_dir(jsonb, boolean, numeric, boolean, jsonb, boolean, boolean) IS 'Internal helper: applies a single option directive to state and returns updated values (including set/setkeys, multiset, and color).';
-
-
--- Compute effective options state (diffingOn, precision) at a given path
-CREATE OR REPLACE FUNCTION _jd_options_state(options jsonb, path jsonb)
-RETURNS jsonb
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  diffing_on boolean := true;  -- default ON
-  precision numeric := 1e-15;  -- default epsilon
-  set_mode boolean := false;    -- default normal array (not set)
-  setkeys jsonb := NULL;        -- default no setkeys
-  multiset_mode boolean := false; -- default normal array (no multiset)
-  color_mode boolean := false;    -- default no color
-  elem jsonb;
-  t text;
-  dirs jsonb;
-  d jsonb;
-BEGIN
-  IF options IS NULL OR jsonb_typeof(options) <> 'array' THEN
-    RETURN jsonb_build_object('diffingOn', diffing_on, 'precision', precision, 'set', set_mode, 'setkeys', setkeys, 'multiset', multiset_mode, 'color', color_mode);
-  END IF;
-
-  FOR elem IN SELECT e FROM jsonb_array_elements(options) AS z(e)
-  LOOP
-    t := jsonb_typeof(elem);
-    IF t = 'object' AND elem ? '@' AND elem ? '^' THEN
-      -- PathOptions element
-      IF _jd_path_is_prefix(path, COALESCE(elem->'@', '[]'::jsonb)) THEN
-        dirs := elem->'^';
-        IF jsonb_typeof(dirs) = 'array' THEN
-          FOR d IN SELECT e FROM jsonb_array_elements(dirs) AS y(e) LOOP
-            SELECT new_diffing_on, new_eps, new_set_mode, new_setkeys, new_multiset, new_color INTO diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode
-            FROM _jd_apply_option_dir(d, diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode);
-          END LOOP;
-        ELSE
-          SELECT new_diffing_on, new_eps, new_set_mode, new_setkeys, new_multiset, new_color INTO diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode
-          FROM _jd_apply_option_dir(dirs, diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode);
-        END IF;
-      END IF;
-    ELSE
-      -- Global option applied everywhere (treat element itself as a directive)
-      SELECT new_diffing_on, new_eps, new_set_mode, new_setkeys, new_multiset, new_color INTO diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode
-      FROM _jd_apply_option_dir(elem, diffing_on, precision, set_mode, setkeys, multiset_mode, color_mode);
-    END IF;
-  END LOOP;
-
-  RETURN jsonb_build_object('diffingOn', diffing_on, 'precision', precision, 'set', set_mode, 'setkeys', setkeys, 'multiset', multiset_mode, 'color', color_mode);
-END;
+create or replace function _jd_array_key(v jsonb, setkeys text[]) returns text
+    language plpgsql
+    immutable as
+$$
+declare
+    ident jsonb;
+begin
+    if setkeys is not null and jsonb_typeof(v) = 'object' then
+        ident := _jd_object_identity(v, setkeys);
+        return ident::text;
+    else
+        return v::text;
+    end if;
+end
 $$;
 
-COMMENT ON FUNCTION _jd_options_state(jsonb, jsonb) IS 'Internal helper: computes effective options at a given path (diffingOn, precision, set, setkeys).';
-
-
--- Build an identifier object from a source object using supplied keys array
-CREATE OR REPLACE FUNCTION _jd_ident_from_keys(obj jsonb, keys jsonb)
-RETURNS jsonb
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  i int := 0;
-  n int := COALESCE(jsonb_array_length(keys), 0);
-  k text;
-  ident jsonb := '{}'::jsonb;
-BEGIN
-  IF obj IS NULL OR jsonb_typeof(obj) <> 'object' THEN
-    RETURN NULL;
-  END IF;
-  WHILE i < n LOOP
-    k := keys->>i;
-    IF k IS NOT NULL THEN
-      ident := ident || jsonb_build_object(k, obj->k);
-    END IF;
-    i := i + 1;
-  END LOOP;
-  RETURN ident;
-END;
+-- Path helpers for DIFF_ON/DIFF_OFF path gating
+create or replace function _jd_path_is_prefix(prefix jsonb, path jsonb) returns boolean
+    language plpgsql
+    immutable as
+$$
+declare
+    lp int;
+    l  int;
+    i  int := 0;
+begin
+    if prefix is null or jsonb_typeof(prefix) <> 'array' then return false; end if;
+    if path is null or jsonb_typeof(path) <> 'array' then return false; end if;
+    lp := jsonb_array_length(prefix); l := jsonb_array_length(path);
+    if lp > l then return false; end if;
+    while i < lp
+        loop
+            if (prefix -> i) is distinct from (path -> i) then return false; end if;
+            i := i + 1;
+        end loop;
+    return true;
+end
 $$;
 
-COMMENT ON FUNCTION _jd_ident_from_keys(jsonb, jsonb) IS 'Internal helper: returns an identifier object composed of the specified keys from obj.';
-
-
-CREATE OR REPLACE FUNCTION _jd_numbers_close_prec(a jsonb, b jsonb, eps numeric)
-RETURNS boolean
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  na numeric;
-  nb numeric;
-  diff numeric;
-BEGIN
-  IF a IS NULL OR b IS NULL THEN
-    RETURN false;
-  END IF;
-  IF jsonb_typeof(a) <> 'number' OR jsonb_typeof(b) <> 'number' THEN
-    RETURN false;
-  END IF;
-  na := (a#>>'{}')::numeric;
-  nb := (b#>>'{}')::numeric;
-  diff := abs(na - nb);
-  RETURN diff <= eps;
-END;
+-- Compute effective options for a given path by combining global options
+-- with path-scoped directives that apply to cur_path. Excludes DIFF_ON/OFF.
+create or replace function _jd_effective_options(options jd_option, cur_path jd_path) returns jd_option
+    language plpgsql
+    immutable as
+$$
+declare
+    e   jsonb;
+    out jsonb := '[]'::jsonb;
+    dir jsonb;
+    atp jsonb;
+    d   jsonb;
+begin
+    if options is null or jsonb_typeof(options) <> 'array' then return '[]'::jsonb; end if;
+    -- global entries (no '@'/'^')
+    for e in select x from jsonb_array_elements(options) as t(x)
+        loop
+            if jsonb_typeof(e) = 'string' then
+                if e::text in ('"SET"', '"MULTISET"') then out := out || jsonb_build_array(e); end if;
+            elsif jsonb_typeof(e) = 'object' then
+                if (not (e ? '@') and not (e ? '^')) then
+                    if (e ? 'setkeys') or (e ? 'precision') then out := out || jsonb_build_array(e); end if;
+                end if;
+            end if;
+        end loop;
+    -- path-scoped directives
+    for e in select x from jsonb_array_elements(options) as t(x)
+        loop
+            if jsonb_typeof(e) = 'object' and (e ? '@') and (e ? '^') then
+                atp := e -> '@'; dir := e -> '^';
+                if jsonb_typeof(atp) = 'array' and jsonb_typeof(dir) = 'array' then
+                    if _jd_path_is_prefix(atp, coalesce(cur_path, '[]'::jsonb)) then
+                        for d in select x from jsonb_array_elements(dir) as t2(x)
+                            loop
+                                if jsonb_typeof(d) = 'string' then
+                                    if d::text in ('"SET"', '"MULTISET"') then
+                                        out := out || jsonb_build_array(d);
+                                    end if; -- ignore DIFF_ON/OFF
+                                elsif jsonb_typeof(d) = 'object' then
+                                    if (d ? 'setkeys') or (d ? 'precision') then
+                                        out := out || jsonb_build_array(d);
+                                    end if;
+                                end if;
+                            end loop;
+                    end if;
+                end if;
+            end if;
+        end loop;
+    return out;
+end
 $$;
 
-COMMENT ON FUNCTION _jd_numbers_close_prec(jsonb, jsonb, numeric) IS 'Internal helper: numeric closeness with specified epsilon.';
-
-
-CREATE OR REPLACE FUNCTION _jd_diff_array(a jsonb, b jsonb, path jsonb, options jsonb)
-RETURNS text
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  la int := COALESCE(jsonb_array_length(a), 0);
-  lb int := COALESCE(jsonb_array_length(b), 0);
-  p int := 0; -- common prefix length
-  s int := 0; -- common suffix length
-  i int;
-  out text := '';
-  idx_path jsonb;
-  st jsonb := _jd_options_state(options, path);
-  set_mode boolean := COALESCE((st->>'set')::boolean, false);
-  setkeys jsonb := st->'setkeys';
-  multiset_mode boolean := COALESCE((st->>'multiset')::boolean, false);
-  v jsonb;
-BEGIN
-  -- Honor DIFF_ON/OFF at the current path
-  IF COALESCE((st->>'diffingOn')::boolean, true) = false THEN
-    RETURN '';
-  END IF;
-
-  -- Simple SET mode (ignore order, ignore duplicates) when enabled and no setkeys/multiset active
-  IF set_mode = true AND setkeys IS NULL AND multiset_mode = false THEN
-    DECLARE
-      a_set jsonb := '[]'::jsonb;
-      b_set jsonb := '[]'::jsonb;
-      elem jsonb;
-      exists_in boolean;
-      rem jsonb := '[]'::jsonb;
-      add jsonb := '[]'::jsonb;
-    BEGIN
-      -- Build distinct sets from a and b (by JSONB equality)
-      FOR elem IN SELECT e FROM jsonb_array_elements(a) AS z(e) LOOP
-        SELECT EXISTS (
-          SELECT 1 FROM jsonb_array_elements(a_set) AS s(x) WHERE s.x = elem
-        ) INTO exists_in;
-        IF NOT exists_in THEN
-          a_set := a_set || jsonb_build_array(elem);
-        END IF;
-      END LOOP;
-      FOR elem IN SELECT e FROM jsonb_array_elements(b) AS z(e) LOOP
-        SELECT EXISTS (
-          SELECT 1 FROM jsonb_array_elements(b_set) AS s(x) WHERE s.x = elem
-        ) INTO exists_in;
-        IF NOT exists_in THEN
-          b_set := b_set || jsonb_build_array(elem);
-        END IF;
-      END LOOP;
-
-      -- Compute removals (in a_set but not in b_set)
-      FOR elem IN SELECT x FROM jsonb_array_elements(a_set) AS s(x) LOOP
-        SELECT EXISTS (
-          SELECT 1 FROM jsonb_array_elements(b_set) AS t(y) WHERE t.y = elem
-        ) INTO exists_in;
-        IF NOT exists_in THEN
-          rem := rem || jsonb_build_array(elem);
-        END IF;
-      END LOOP;
-      -- Compute additions (in b_set but not in a_set)
-      FOR elem IN SELECT y FROM jsonb_array_elements(b_set) AS t(y) LOOP
-        SELECT EXISTS (
-          SELECT 1 FROM jsonb_array_elements(a_set) AS s(x) WHERE s.x = elem
-        ) INTO exists_in;
-        IF NOT exists_in THEN
-          add := add || jsonb_build_array(elem);
-        END IF;
-      END LOOP;
-
-      -- If sets are equal, no diff
-      IF jsonb_array_length(rem) = 0 AND jsonb_array_length(add) = 0 THEN
-        RETURN '';
-      END IF;
-
-      -- Emit a set-style diff block at a synthetic index {}
-      idx_path := _jd_path_append(path, '{}'::jsonb);
-      out := out || '@ ' || _jd_render_path(idx_path) || E'\n';
-      -- Removals
-      FOR elem IN SELECT x FROM jsonb_array_elements(rem) AS s(x) LOOP
-        out := out || '- ' || _jd_render_value(elem) || E'\n';
-      END LOOP;
-      -- Additions
-      FOR elem IN SELECT y FROM jsonb_array_elements(add) AS t(y) LOOP
-        out := out || '+ ' || _jd_render_value(elem) || E'\n';
-      END LOOP;
-      RETURN out;
-    END;
-  END IF;
-
-  -- SetKeys mode: arrays of objects matched by identifier keys
-  IF setkeys IS NOT NULL AND jsonb_typeof(setkeys) = 'array' THEN
-    DECLARE
-      header_written boolean := false;
-      obj_id jsonb;
-      a_val jsonb;
-      b_val jsonb;
-      subdiff text;
-    BEGIN
-      -- Deletions (ids in a but not in b)
-      FOR obj_id, a_val IN
-        SELECT _id, val
-        FROM (
-          SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val, min(ord) AS o
-          FROM jsonb_array_elements(a) WITH ORDINALITY z(e,ord)
-          WHERE jsonb_typeof(e) = 'object'
-          GROUP BY _id, e
-        ) aa
-        WHERE NOT EXISTS (
-          SELECT 1 FROM (
-            SELECT (_jd_ident_from_keys(e, setkeys)) AS _id
-            FROM jsonb_array_elements(b) z(e)
-            WHERE jsonb_typeof(e) = 'object'
-          ) bb WHERE bb._id = aa._id
-        )
-        ORDER BY o
-      LOOP
-        IF NOT header_written THEN
-          out := out || '^ ' || _jd_render_value(jsonb_build_object('setkeys', setkeys)) || E'\n';
-          header_written := true;
-        END IF;
-        out := out || '@ ' || _jd_render_path(_jd_path_append(path, obj_id)) || E'\n';
-        out := out || '- ' || _jd_render_value(a_val) || E'\n';
-      END LOOP;
-
-      -- Additions (ids in b but not in a)
-      FOR obj_id, b_val IN
-        SELECT _id, val
-        FROM (
-          SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val, min(ord) AS o
-          FROM jsonb_array_elements(b) WITH ORDINALITY z(e,ord)
-          WHERE jsonb_typeof(e) = 'object'
-          GROUP BY _id, e
-        ) bb
-        WHERE NOT EXISTS (
-          SELECT 1 FROM (
-            SELECT (_jd_ident_from_keys(e, setkeys)) AS _id
-            FROM jsonb_array_elements(a) z(e)
-            WHERE jsonb_typeof(e) = 'object'
-          ) aa WHERE aa._id = bb._id
-        )
-        ORDER BY o
-      LOOP
-        IF NOT header_written THEN
-          out := out || '^ ' || _jd_render_value(jsonb_build_object('setkeys', setkeys)) || E'\n';
-          header_written := true;
-        END IF;
-        out := out || '@ ' || _jd_render_path(_jd_path_append(path, obj_id)) || E'\n';
-        out := out || '+ ' || _jd_render_value(b_val) || E'\n';
-      END LOOP;
-
-      -- Matched ids: recurse into object diffs (use only the first occurrence per id on each side)
-      FOR obj_id, a_val, b_val IN
-        WITH a_first AS (
-          SELECT DISTINCT ON (_id)
-                 _id,
-                 val
-          FROM (
-            SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val, ord
-            FROM jsonb_array_elements(a) WITH ORDINALITY z(e,ord)
-            WHERE jsonb_typeof(e) = 'object'
-          ) s
-          ORDER BY _id, ord
-        ), b_first AS (
-          SELECT DISTINCT ON (_id)
-                 _id,
-                 val
-          FROM (
-            SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val, ord
-            FROM jsonb_array_elements(b) WITH ORDINALITY z(e,ord)
-            WHERE jsonb_typeof(e) = 'object'
-          ) s
-          ORDER BY _id, ord
-        )
-        SELECT a_first._id, a_first.val, b_first.val
-        FROM a_first JOIN b_first USING (_id)
-        ORDER BY _id::text
-      LOOP
-        subdiff := _jd_diff_text(a_val, b_val, _jd_path_append(path, obj_id), options);
-        IF subdiff IS NOT NULL AND subdiff <> '' THEN
-          IF NOT header_written THEN
-            out := out || '^ ' || _jd_render_value(jsonb_build_object('setkeys', setkeys)) || E'\n';
-            header_written := true;
-          END IF;
-          out := out || subdiff;
-        END IF;
-      END LOOP;
-
-      -- Handle duplicate occurrences for ids present in both arrays: remove extras from A, add extras from B
-      -- Extras in A (beyond the first occurrence) should be deleted by index
-      FOR i, v IN
-        WITH a_elems AS (
-          SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val, ord
-          FROM jsonb_array_elements(a) WITH ORDINALITY z(e,ord)
-          WHERE jsonb_typeof(e) = 'object'
-        ), b_ids AS (
-          SELECT DISTINCT (_jd_ident_from_keys(e, setkeys)) AS _id
-          FROM jsonb_array_elements(b) z(e)
-          WHERE jsonb_typeof(e) = 'object'
-        ), a_dups AS (
-          SELECT _id, val, ord, min(ord) OVER (PARTITION BY _id) AS first_ord
-          FROM a_elems
-        )
-        SELECT ord, val
-        FROM a_dups
-        WHERE _id IN (SELECT _id FROM b_ids) AND ord > first_ord
-        ORDER BY ord
-      LOOP
-        IF NOT header_written THEN
-          out := out || '^ ' || _jd_render_value(jsonb_build_object('setkeys', setkeys)) || E'\n';
-          header_written := true;
-        END IF;
-        out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(i - 1))) || E'\n';
-        out := out || '- ' || _jd_render_value(v) || E'\n';
-      END LOOP;
-
-      -- Extras in B (beyond the first occurrence) should be added by index
-      FOR i, v IN
-        WITH b_elems AS (
-          SELECT (_jd_ident_from_keys(e, setkeys)) AS _id, e AS val, ord
-          FROM jsonb_array_elements(b) WITH ORDINALITY z(e,ord)
-          WHERE jsonb_typeof(e) = 'object'
-        ), a_ids AS (
-          SELECT DISTINCT (_jd_ident_from_keys(e, setkeys)) AS _id
-          FROM jsonb_array_elements(a) z(e)
-          WHERE jsonb_typeof(e) = 'object'
-        ), b_dups AS (
-          SELECT _id, val, ord, min(ord) OVER (PARTITION BY _id) AS first_ord
-          FROM b_elems
-        )
-        SELECT ord, val
-        FROM b_dups
-        WHERE _id IN (SELECT _id FROM a_ids) AND ord > first_ord
-        ORDER BY ord
-      LOOP
-        IF NOT header_written THEN
-          out := out || '^ ' || _jd_render_value(jsonb_build_object('setkeys', setkeys)) || E'\n';
-          header_written := true;
-        END IF;
-        out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(i - 1))) || E'\n';
-        out := out || '+ ' || _jd_render_value(v) || E'\n';
-      END LOOP;
-
-      RETURN out;
-    END;
-  END IF;
-
-  -- Multiset mode: compare counts ignoring order, allow duplicates
-  IF multiset_mode THEN
-    DECLARE
-      have_diff boolean := false;
-      cnt int;
-      val jsonb;
-    BEGIN
-      -- quick equality check by counts
-      IF NOT EXISTS (
-        SELECT 1 FROM (
-          SELECT e AS v, count(*) AS c FROM jsonb_array_elements(a) z(e) GROUP BY e
-        ) aa FULL JOIN (
-          SELECT e AS v, count(*) AS c FROM jsonb_array_elements(b) z(e) GROUP BY e
-        ) bb ON aa.v = bb.v
-        WHERE COALESCE(aa.c,0) <> COALESCE(bb.c,0)
-      ) THEN
-        RETURN '';
-      END IF;
-
-      out := out || '^ ' || '"MULTISET"' || E'\n';
-      out := out || '@ ' || _jd_render_path(_jd_path_append(path, '[]'::jsonb)) || E'\n';
-
-      -- Deletions: values where a has more than b
-      FOR val, cnt IN
-        SELECT _v, (a_c - COALESCE(b_c,0)) AS n
-        FROM (
-          SELECT e AS _v, count(*) AS a_c FROM jsonb_array_elements(a) z(e) GROUP BY e
-        ) A LEFT JOIN (
-          SELECT e AS _v, count(*) AS b_c FROM jsonb_array_elements(b) z(e) GROUP BY e
-        ) B USING (_v)
-        WHERE (a_c - COALESCE(b_c,0)) > 0
-        ORDER BY 1
-      LOOP
-        WHILE cnt > 0 LOOP
-          out := out || '- ' || _jd_render_value(val) || E'\n';
-          cnt := cnt - 1;
-        END LOOP;
-      END LOOP;
-
-      -- Additions: values where b has more than a
-      FOR val, cnt IN
-        SELECT _v, (b_c - COALESCE(a_c,0)) AS n
-        FROM (
-          SELECT e AS _v, count(*) AS b_c FROM jsonb_array_elements(b) z(e) GROUP BY e
-        ) B LEFT JOIN (
-          SELECT e AS _v, count(*) AS a_c FROM jsonb_array_elements(a) z(e) GROUP BY e
-        ) A USING (_v)
-        WHERE (b_c - COALESCE(a_c,0)) > 0
-        ORDER BY 1
-      LOOP
-        WHILE cnt > 0 LOOP
-          out := out || '+ ' || _jd_render_value(val) || E'\n';
-          cnt := cnt - 1;
-        END LOOP;
-      END LOOP;
-
-      RETURN out;
-    END;
-  END IF;
-
-  -- Set mode: compare ignoring order; header and {} path marker
-  IF set_mode THEN
-    -- Build removals: unique elements in a not present in b
-    out := out; -- no-op for clarity
-    -- Determine differences
-    DECLARE
-      have_diff boolean := false;
-    BEGIN
-      -- Check if sets are equal quickly
-      -- If every distinct elem in a exists in b and vice versa, then no diff
-      IF NOT EXISTS (
-        SELECT 1 FROM (
-          SELECT DISTINCT e AS v FROM jsonb_array_elements(a) z(e)
-        ) aa
-        WHERE NOT EXISTS (
-          SELECT 1 FROM jsonb_array_elements(b) bb(e) WHERE bb.e = aa.v
-        )
-      ) AND NOT EXISTS (
-        SELECT 1 FROM (
-          SELECT DISTINCT e AS v FROM jsonb_array_elements(b) z(e)
-        ) bb
-        WHERE NOT EXISTS (
-          SELECT 1 FROM jsonb_array_elements(a) aa(e) WHERE aa.e = bb.v
-        )
-      ) THEN
-        RETURN '';
-      END IF;
-
-      out := out || '^ ' || '"SET"' || E'\n';
-      out := out || '@ ' || _jd_render_path(_jd_path_append(path, '{}'::jsonb)) || E'\n';
-
-      -- Deletions in deterministic order: by original order of a, but unique and only those not in b
-      FOR v IN
-        SELECT val FROM (
-          SELECT e AS val, min(ord) AS o
-          FROM (
-            SELECT e, ord
-            FROM jsonb_array_elements(a) WITH ORDINALITY t(e,ord)
-          ) x
-          GROUP BY e
-          HAVING NOT EXISTS (
-            SELECT 1 FROM jsonb_array_elements(b) q(e2) WHERE q.e2 = e
-          )
-        ) s
-        ORDER BY o
-      LOOP
-        out := out || '- ' || _jd_render_value(v) || E'\n';
-      END LOOP;
-
-      -- Additions in deterministic order: by original order of b, but unique and only those not in a
-      FOR v IN
-        SELECT val FROM (
-          SELECT e AS val, min(ord) AS o
-          FROM (
-            SELECT e, ord
-            FROM jsonb_array_elements(b) WITH ORDINALITY t(e,ord)
-          ) x
-          GROUP BY e
-          HAVING NOT EXISTS (
-            SELECT 1 FROM jsonb_array_elements(a) q(e2) WHERE q.e2 = e
-          )
-        ) s
-        ORDER BY o
-      LOOP
-        out := out || '+ ' || _jd_render_value(v) || E'\n';
-      END LOOP;
-
-      RETURN out;
-    END;
-  END IF;
-  -- Find common prefix
-  WHILE p < la AND p < lb AND a->p = b->p LOOP
-    p := p + 1;
-  END LOOP;
-
-  -- Find common suffix (ensure no overlap with prefix)
-  WHILE (s < la - p) AND (s < lb - p) AND (a->(la - 1 - s)) = (b->(lb - 1 - s)) LOOP
-    s := s + 1;
-  END LOOP;
-
-  IF la = lb AND p = la THEN
-    RETURN '';
-  END IF;
-
-  -- For normal arrays, compute common prefix/suffix while treating numerically-close numbers as equal per options
-  WHILE p < la AND p < lb LOOP
-    idx_path := _jd_path_append(path, to_jsonb(p));
-    IF jsonb_typeof(a->p) = 'number' AND jsonb_typeof(b->p) = 'number' THEN
-      IF NOT _jd_numbers_close_prec(a->p, b->p, ((_jd_options_state(options, idx_path)->>'precision')::numeric)) THEN
-        EXIT;
-      END IF;
-    ELSE
-      IF (a->p) IS DISTINCT FROM (b->p) THEN
-        EXIT;
-      END IF;
-    END IF;
-    p := p + 1;
-  END LOOP;
-
-  WHILE (s < la - p) AND (s < lb - p) LOOP
-    idx_path := _jd_path_append(path, to_jsonb(lb - s - 1));
-    IF jsonb_typeof(a->(la - s - 1)) = 'number' AND jsonb_typeof(b->(lb - s - 1)) = 'number' THEN
-      IF NOT _jd_numbers_close_prec(a->(la - s - 1), b->(lb - s - 1), ((_jd_options_state(options, idx_path)->>'precision')::numeric)) THEN
-        EXIT;
-      END IF;
-    ELSE
-      IF (a->(la - s - 1)) IS DISTINCT FROM (b->(lb - s - 1)) THEN
-        EXIT;
-      END IF;
-    END IF;
-    s := s + 1;
-  END LOOP;
-
-  -- If arrays are effectively equal under precision, return no diff
-  IF p = la AND p = lb THEN
-    RETURN '';
-  END IF;
-
-  idx_path := _jd_path_append(path, to_jsonb(p));
-  out := out || '@ ' || _jd_render_path(idx_path) || E'\n';
-
-  IF p = 0 THEN
-    out := out || '[' || E'\n';
-  ELSE
-    out := out || '  ' || _jd_render_value(a->(p-1)) || E'\n';
-  END IF;
-
-  -- deletions (from a[p .. la-s-1])
-  i := p;
-  WHILE i < la - s LOOP
-    out := out || '- ' || _jd_render_value(a->i) || E'\n';
-    i := i + 1;
-  END LOOP;
-
-  -- additions (from b[p .. lb-s-1])
-  i := p;
-  WHILE i < lb - s LOOP
-    out := out || '+ ' || _jd_render_value(b->i) || E'\n';
-    i := i + 1;
-  END LOOP;
-
-  IF s = 0 THEN
-    out := out || ']' || E'\n';
-  ELSE
-    out := out || '  ' || _jd_render_value(a->(la - s)) || E'\n';
-  END IF;
-
-  RETURN out;
-END;
+create or replace function _jd_diff_allowed(cur_path jd_path, options jd_option) returns boolean
+    language plpgsql
+    immutable as
+$$
+declare
+    e         jsonb;
+    atp       jsonb;
+    dir       jsonb;
+    on_depth  int     := null;
+    off_depth int     := null;
+    depth     int;
+    on_any    boolean := false;
+begin
+    -- Default allow when no gating options present
+    if options is null or jsonb_typeof(options) <> 'array' then return true; end if;
+    for e in select x from jsonb_array_elements(options) as t(x)
+        loop
+            if jsonb_typeof(e) = 'object' and (e ? '@') and (e ? '^') then
+                atp := e -> '@'; dir := e -> '^';
+                if jsonb_typeof(atp) = 'array' and jsonb_typeof(dir) = 'array' then
+                    -- track presence of any DIFF_ON directives globally
+                    if exists(select 1
+                              from jsonb_array_elements(dir) d0(x)
+                              where jsonb_typeof(d0.x) = 'string' and (d0.x::text) = '"DIFF_ON"') then
+                        on_any := true;
+                    end if;
+                    if _jd_path_is_prefix(atp, coalesce(cur_path, '[]'::jsonb)) then
+                        depth := jsonb_array_length(atp);
+                        -- scan directives for DIFF_ON/OFF
+                        if exists(select 1 from jsonb_array_elements(dir) d(x) where jsonb_typeof(d.x) = 'string'
+                                                                                 and (d.x::text) = '"DIFF_ON"') then
+                            if on_depth is null or depth > on_depth then on_depth := depth; end if;
+                        end if;
+                        if exists(select 1 from jsonb_array_elements(dir) d2(x) where jsonb_typeof(d2.x) = 'string'
+                                                                                  and (d2.x::text) = '"DIFF_OFF"') then
+                            if off_depth is null or depth > off_depth then off_depth := depth; end if;
+                        end if;
+                    end if;
+                end if;
+            end if;
+        end loop;
+    -- If any DIFF_ON directive exists globally, enforce allowlist semantics:
+    -- only paths under a DIFF_ON-prefixed entry are allowed unless also explicitly turned off deeper.
+    if on_any and on_depth is null then
+        -- No matching DIFF_ON prefix for this path; suppress it regardless of DIFF_OFF
+        return false;
+    end if;
+    if on_depth is not null then return true; end if;
+    if off_depth is not null then return false; end if;
+    return true;
+end
 $$;
 
-COMMENT ON FUNCTION _jd_diff_array(jsonb, jsonb, jsonb, jsonb) IS 'Internal helper: compute jd-style array diff for core cases with simple prefix/suffix context. Honors options (DIFF_ON/OFF).';
+-- --------------------------------------------------------------------------------
+-- Public API (struct-first)
+-- --------------------------------------------------------------------------------
 
-
-CREATE OR REPLACE FUNCTION _jd_diff_text(a jsonb, b jsonb, path jsonb, options jsonb)
-RETURNS text
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  out text := '';
-  ta text := CASE WHEN a IS NULL THEN 'void' ELSE jsonb_typeof(a) END;
-  tb text := CASE WHEN b IS NULL THEN 'void' ELSE jsonb_typeof(b) END;
-  k text;
-  v_a jsonb;
-  v_b jsonb;
-  st jsonb := _jd_options_state(options, path);
-  eps numeric := ((jsonb_extract_path_text(_jd_options_state(options, path), 'precision'))::numeric);
-  color boolean := COALESCE((_jd_options_state(options, path)->>'color')::boolean, false);
-  default_eps numeric := 1e-15;
-  header_emitted boolean := false;
-  diff_here boolean := COALESCE((st->>'diffingOn')::boolean, true);
-BEGIN
-  -- Handle equality including NULLs/void
-  IF a IS NOT DISTINCT FROM b THEN
-    RETURN '';
-  END IF;
-
-  -- Treat numerically-close numbers as equal to satisfy floating point precision case
-  IF ta = 'number' AND tb = 'number' AND _jd_numbers_close_prec(a, b, eps) THEN
-    RETURN '';
-  END IF;
-
-  -- Emit headers if needed (color and precision) when we are about to output a change at this path
-  PERFORM 1; -- placeholder no-op
-
-  -- Void transitions produce single +/- line when allowed at this path
-  IF ta = 'void' AND tb <> 'void' THEN
-    IF NOT diff_here THEN
-      RETURN '';
-    END IF;
-    IF color THEN
-      out := out || '^ ' || '"COLOR"' || E'\n';
-      header_emitted := true;
-    END IF;
-    IF eps IS NOT NULL AND eps <> default_eps THEN
-      out := out || '^ ' || _jd_render_value(jsonb_build_object('precision', to_jsonb(eps))) || E'\n';
-      header_emitted := true;
-    END IF;
-    out := out || '@ ' || _jd_render_path(path) || E'\n'
-               || '+ ' || _jd_render_value(b) || E'\n';
-    RETURN out;
-  ELSIF tb = 'void' AND ta <> 'void' THEN
-    IF NOT diff_here THEN
-      RETURN '';
-    END IF;
-    IF color THEN
-      out := out || '^ ' || '"COLOR"' || E'\n';
-      header_emitted := true;
-    END IF;
-    IF eps IS NOT NULL AND eps <> default_eps THEN
-      out := out || '^ ' || _jd_render_value(jsonb_build_object('precision', to_jsonb(eps))) || E'\n';
-      header_emitted := true;
-    END IF;
-    out := out || '@ ' || _jd_render_path(path) || E'\n'
-               || '- ' || _jd_render_value(a) || E'\n';
-    RETURN out;
-  END IF;
-
-  -- Objects: recurse per key
-  IF ta = 'object' AND tb = 'object' THEN
-    -- removals (deterministic order) — only when emitting at this path is allowed
-    FOR k IN
-      SELECT key FROM (
-        SELECT key FROM jsonb_object_keys(a) AS key
-        EXCEPT
-        SELECT key FROM jsonb_object_keys(b) AS key
-      ) x
-      ORDER BY key
-    LOOP
-      IF diff_here THEN
-        IF out = '' THEN
-          IF color THEN
-            out := out || '^ ' || '"COLOR"' || E'\n';
-          END IF;
-          IF eps IS NOT NULL AND eps <> default_eps THEN
-            out := out || '^ ' || _jd_render_value(jsonb_build_object('precision', to_jsonb(eps))) || E'\n';
-          END IF;
-        END IF;
-        out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
-                    || '- ' || _jd_render_value(a->k) || E'\n';
-      END IF;
-    END LOOP;
-
-    -- changes (deterministic order)
-    FOR k IN
-      SELECT key FROM (
-        SELECT key FROM jsonb_object_keys(a) AS key
-        INTERSECT
-        SELECT key FROM jsonb_object_keys(b) AS key
-      ) s
-      ORDER BY key
-    LOOP
-      v_a := a->k; v_b := b->k;
-      IF v_a IS DISTINCT FROM v_b THEN
-        -- Skip differences for numerically-close numbers
-        IF jsonb_typeof(v_a) = 'number' AND jsonb_typeof(v_b) = 'number' AND _jd_numbers_close_prec(v_a, v_b, eps) THEN
-          -- no-op
-        ELSE
-          out := out || _jd_diff_text(v_a, v_b, _jd_path_append(path, to_jsonb(k)), options);
-        END IF;
-      END IF;
-    END LOOP;
-
-    -- additions (deterministic order; after changes to match README example)
-    FOR k IN
-      SELECT key FROM (
-        SELECT key FROM jsonb_object_keys(b) AS key
-        EXCEPT
-        SELECT key FROM jsonb_object_keys(a) AS key
-      ) x
-      ORDER BY key
-    LOOP
-      IF diff_here THEN
-        IF out = '' THEN
-          IF color THEN
-            out := out || '^ ' || '"COLOR"' || E'\n';
-          END IF;
-          IF eps IS NOT NULL AND eps <> default_eps THEN
-            out := out || '^ ' || _jd_render_value(jsonb_build_object('precision', to_jsonb(eps))) || E'\n';
-          END IF;
-        END IF;
-        out := out || '@ ' || _jd_render_path(_jd_path_append(path, to_jsonb(k))) || E'\n'
-                    || '+ ' || _jd_render_value(b->k) || E'\n';
-      END IF;
-    END LOOP;
-
-    RETURN out;
-  ELSIF ta = 'array' AND tb = 'array' THEN
-    RETURN _jd_diff_array(a, b, path, options);
-  ELSE
-    -- Scalar changes or type changes (non-void): emit replace as -/+ pair when allowed at this path
-    IF NOT diff_here THEN
-      RETURN '';
-    END IF;
-    IF color THEN
-      out := out || '^ ' || '"COLOR"' || E'\n';
-    END IF;
-    IF eps IS NOT NULL AND eps <> default_eps THEN
-      out := out || '^ ' || _jd_render_value(jsonb_build_object('precision', to_jsonb(eps))) || E'\n';
-    END IF;
-    out := out || '@ ' || _jd_render_path(path) || E'\n'
-               || '- ' || _jd_render_value(a) || E'\n'
-               || '+ ' || _jd_render_value(b) || E'\n';
-    RETURN out;
-  END IF;
-END;
+create or replace function _jd_option_get_precision(options jd_option) returns numeric
+    language plpgsql
+    immutable as
+$$
+declare
+    e jsonb;
+    p jsonb;
+begin
+    for e in select x from jsonb_array_elements(coalesce(options, '[]'::jsonb)) as t(x)
+        loop
+            if jsonb_typeof(e) = 'object' and (e ? 'precision') then
+                p := e -> 'precision';
+                if p is null then continue; end if;
+                if jsonb_typeof(p) = 'number' then return (p::text)::numeric; end if;
+            end if;
+        end loop;
+    return null;
+end
 $$;
 
-COMMENT ON FUNCTION _jd_diff_text(jsonb, jsonb, jsonb, jsonb) IS 'Internal helper: recursive jd-style textual diff limited to core spec cases. Honors options (DIFF_ON/OFF, precision).';
-
-
--- Text-mode wrapper retained for convenience: returns the human-readable jd diff as TEXT
-CREATE OR REPLACE FUNCTION jd_diff_text(a jsonb, b jsonb, options jsonb DEFAULT NULL)
-RETURNS text
-LANGUAGE plpgsql
-STABLE
-AS $$
-DECLARE
-  body text;
-  out text := '';
-  elem jsonb;
-BEGIN
-  body := _jd_diff_text(a, b, '[]'::jsonb, options);
-
-  -- If there is no diff, return immediately (do not emit headers)
-  IF COALESCE(body, '') = '' THEN
-    RETURN '';
-  END IF;
-
-  -- Emit PathOptions headers (objects with '@' and '^') in the order provided
-  IF options IS NOT NULL AND jsonb_typeof(options) = 'array' THEN
-    FOR elem IN SELECT e FROM jsonb_array_elements(options) AS z(e) LOOP
-      IF jsonb_typeof(elem) = 'object' AND (elem ? '@') AND (elem ? '^') THEN
-        out := out || '^ ' || _jd_render_value(elem) || E'\n';
-      END IF;
-    END LOOP;
-  END IF;
-
-  RETURN out || body;
-END;
+create or replace function _jd_numbers_equal(a jsonb, b jsonb, tol numeric) returns boolean
+    language plpgsql
+    immutable as
+$$
+declare
+    av      numeric;
+    bv      numeric;
+    eff_tol numeric;
+begin
+    if jsonb_typeof(a) <> 'number' or jsonb_typeof(b) <> 'number' then return null; end if;
+    av := (a::text)::numeric; bv := (b::text)::numeric;
+    -- Default tolerance to a small epsilon to smooth floating-point textual variants
+    eff_tol := coalesce(tol, 1e-15);
+    if eff_tol = 0 then return av = bv; end if;
+    return abs(av - bv) <= eff_tol;
+end
 $$;
 
-COMMENT ON FUNCTION jd_diff_text(jsonb, jsonb, jsonb) IS 'Compute jd spec-like textual diff for core cases and return TEXT. Returns empty string when equal. Honors options (DIFF_ON/OFF, precision).';
-
-
--- Primary entrypoint: returns JSONB. In text mode this is a JSON string value containing the jd diff text.
-CREATE OR REPLACE FUNCTION jd_diff(a jsonb, b jsonb, options jsonb DEFAULT NULL)
-RETURNS jsonb
-LANGUAGE plpgsql
-STABLE
-AS $$
-DECLARE
-  txt text;
-BEGIN
-  -- For now, only text format is implemented; return as JSON string
-  txt := jd_diff_text(a, b, options);
-  RETURN to_jsonb(txt);
-END;
+create or replace function _jd_json_equal(a jsonb, b jsonb, options jd_option) returns boolean
+    language plpgsql
+    immutable as
+$$
+declare
+begin
+    if a is null and b is null then return true; end if;
+    if a is null or b is null then return false; end if;
+    if jsonb_typeof(a) = 'number' and jsonb_typeof(b) = 'number' then
+        return _jd_numbers_equal(a, b, _jd_option_get_precision(options));
+    end if;
+    return a is not distinct from b;
+end
 $$;
 
-COMMENT ON FUNCTION jd_diff(jsonb, jsonb, jsonb) IS 'Compute jd spec-like diff and return JSONB. In text mode, returns a JSON string containing the diff text; empty string when equal.';
-
-
-CREATE OR REPLACE FUNCTION _jd_apply_op(doc jsonb, op jsonb)
-RETURNS jsonb
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
-  oper text := op->>'op';
-  path jsonb := COALESCE(op->'path', '[]'::jsonb);
-  p0 text;
-  val jsonb := op->'value';
-BEGIN
-  -- Only support empty path (root) or single-key top-level paths for now
-  IF jsonb_array_length(path) = 0 THEN
-    IF oper = 'replace' THEN
-      RETURN val;
-    ELSIF oper = 'add' THEN
-      -- add at root is equivalent to replace
-      RETURN val;
-    ELSIF oper = 'remove' THEN
-      -- removing root yields NULL (jd void). Represent with jsonb 'null'.
-      RETURN 'null'::jsonb;
-    ELSE
-      RAISE EXCEPTION 'Unsupported op at root: %', oper;
-    END IF;
-  ELSIF jsonb_array_length(path) = 1 THEN
-    p0 := path->>0;
-    IF oper = 'remove' THEN
-      IF jsonb_typeof(doc) <> 'object' THEN
-        RAISE EXCEPTION 'Cannot remove key % from non-object at path %', p0, _jd_path_text(path);
-      END IF;
-      RETURN doc - p0;
-    ELSIF oper = 'add' THEN
-      IF jsonb_typeof(doc) <> 'object' THEN
-        RAISE EXCEPTION 'Cannot add key % to non-object at path %', p0, _jd_path_text(path);
-      END IF;
-      RETURN jsonb_set(doc, ARRAY[p0], val, true);
-    ELSIF oper = 'replace' THEN
-      IF jsonb_typeof(doc) = 'object' THEN
-        RETURN jsonb_set(doc, ARRAY[p0], val, true);
-      ELSE
-        RAISE EXCEPTION 'Cannot replace at key % on non-object at path %', p0, _jd_path_text(path);
-      END IF;
-    ELSE
-      RAISE EXCEPTION 'Unsupported op: %', oper;
-    END IF;
-  ELSE
-    RAISE EXCEPTION 'Nested paths are not yet supported (path: %)', _jd_path_text(path);
-  END IF;
-END;
+create or replace function jd_equal(a jsonb, b jsonb, options jd_option default '[]'::jsonb) returns boolean
+    language sql
+    stable as
+$$
+select _jd_json_equal($1, $2, $3)
 $$;
 
-COMMENT ON FUNCTION _jd_apply_op(jsonb, jsonb) IS 'Internal helper: apply a single simplified jd-like operation to a JSONB document.';
+-- Internal recursive helper with explicit path
+create or replace function _jd_diff_struct(a jsonb, b jsonb, cur_path jd_path, options jd_option) returns setof jd_diff_element
+    language plpgsql
+    stable as
+$$
+declare
+    elem     jd_diff_element;
+    k        text;
+    la       int;
+    lb       int;
+    i        int;
+    p        int;
+    s        int;
+    wa       int;
+    wb       int;
+    loc_opts jd_option := _jd_effective_options(options, cur_path);
+begin
+    if _jd_json_equal(a, b, loc_opts) then return; end if;
 
+    -- Handle void (SQL NULL) on either side as add-only or remove-only at current path
+    if a is null or b is null then
+        elem.metadata := row (false)::jd_metadata;
+        elem.options := coalesce(options, '[]'::jsonb);
+        elem.path := coalesce(cur_path, '[]'::jsonb);
+        elem.before := null;
+        if a is null then
+            elem.remove := null;
+            elem.add := array [b];
+        elsif b is null then
+            elem.remove := array [a];
+            elem.add := null;
+        end if;
+        elem.after := null;
+        return next elem;
+        return;
+    end if;
 
-CREATE OR REPLACE FUNCTION jd_patch(a jsonb, diff jsonb, options jsonb DEFAULT NULL)
-RETURNS jsonb
-LANGUAGE plpgsql
-STABLE
-AS $$
-DECLARE
-  res jsonb := a;
-  op jsonb;
-BEGIN
-  -- Currently, options are not used by patching semantics in this simplified implementation.
-  IF diff IS NULL OR diff = 'null'::jsonb THEN
-    RETURN res;
-  END IF;
-  IF jsonb_typeof(diff) <> 'array' THEN
-    RAISE EXCEPTION 'jd_patch expects an array of operations, got %', jsonb_typeof(diff);
-  END IF;
-  FOR op IN SELECT t.elem FROM jsonb_array_elements(diff) AS t(elem)
-  LOOP
-    res := _jd_apply_op(res, op);
-  END LOOP;
-  RETURN res;
-END;
+    if jsonb_typeof(a) = 'object' and jsonb_typeof(b) = 'object' then
+        -- removals (emit first)
+        for k in select key
+                 from (select key
+                       from jsonb_object_keys(a) as key
+                       except
+                       select key
+                       from jsonb_object_keys(b) as key) s
+                 order by 1
+            loop
+                elem.metadata := row (false)::jd_metadata;
+                elem.options := coalesce(options, '[]'::jsonb);
+                elem.path := coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(k));
+                elem.before := null;
+                elem.remove := array [a -> k];
+                elem.add := null;
+                elem.after := null;
+                return next elem;
+            end loop;
+
+        -- replacements or nested diffs (emit second)
+        for k in select key
+                 from (select key
+                       from jsonb_object_keys(a) as key
+                       intersect
+                       select key
+                       from jsonb_object_keys(b) as key) s
+                 order by 1
+            loop
+                declare
+                    child_path jsonb     := coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(k));
+                    child_opts jd_option := _jd_effective_options(options, child_path);
+                begin
+                    if ((jsonb_typeof(a -> k) = 'object' and jsonb_typeof(b -> k) = 'object') or
+                        (jsonb_typeof(a -> k) = 'array' and jsonb_typeof(b -> k) = 'array')) then
+                        -- Recurse; deeper level will use its own effective options for equality
+                        return query select * from _jd_diff_struct(a -> k, b -> k, child_path, options);
+                    else
+                        -- Scalars or differing types: decide using child-specific options (e.g., precision)
+                        if not _jd_json_equal(a -> k, b -> k, child_opts) then
+                            elem.metadata := row (false)::jd_metadata;
+                            elem.options := coalesce(options, '[]'::jsonb);
+                            elem.path := child_path;
+                            elem.before := null;
+                            elem.remove := array [a -> k];
+                            elem.add := array [b -> k];
+                            elem.after := null;
+                            return next elem;
+                        end if;
+                    end if;
+                end;
+            end loop;
+
+        -- additions (emit last)
+        for k in select key
+                 from (select key
+                       from jsonb_object_keys(b) as key
+                       except
+                       select key
+                       from jsonb_object_keys(a) as key) s
+                 order by 1
+            loop
+                elem.metadata := row (false)::jd_metadata;
+                elem.options := coalesce(options, '[]'::jsonb);
+                elem.path := coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(k));
+                elem.before := null;
+                elem.remove := null;
+                elem.add := array [b -> k];
+                elem.after := null;
+                return next elem;
+            end loop;
+        return;
+    end if;
+
+    if jsonb_typeof(a) = 'array' and jsonb_typeof(b) = 'array' then
+        -- Option: SET/MULTISET or setkeys for arrays
+        if _jd_option_has(loc_opts, 'MULTISET') or _jd_option_has(loc_opts, 'SET') or
+           _jd_option_get_setkeys(loc_opts) is not null then
+            -- Handle arrays as sets/multisets; for setkeys, treat objects by identity
+            declare
+                is_multi boolean := _jd_option_has(loc_opts, 'MULTISET');
+                setkeys  text[]  := _jd_option_get_setkeys(loc_opts);
+                ah       jsonb;
+                bh       jsonb; -- element during iteration
+                hkey     text; -- hash key
+                -- maps stored as temporary jsonb objects mapping key->count or key->jsonb element
+                amap     jsonb   := '{}'::jsonb;
+                bmap     jsonb   := '{}'::jsonb;
+                counts   boolean := is_multi; -- whether to track counts
+            begin
+                -- build amap
+                i := 0; la := coalesce(jsonb_array_length(a), 0);
+                while i < la
+                    loop
+                        ah := a -> i; hkey := _jd_array_key(ah, setkeys);
+                        if counts then
+                            if (amap ? hkey) then
+                                amap := jsonb_set(amap, array [hkey], to_jsonb(((amap ->> hkey)::int + 1)), true);
+                            else
+                                amap := jsonb_set(amap, array [hkey], to_jsonb(1), true);
+                            end if;
+                        else
+                            -- preserve first occurrence for representative when duplicates exist
+                            if not (amap ? hkey) then amap := jsonb_set(amap, array [hkey], ah, true); end if;
+                        end if;
+                        i := i + 1;
+                    end loop;
+                -- build bmap
+                i := 0; lb := coalesce(jsonb_array_length(b), 0);
+                while i < lb
+                    loop
+                        bh := b -> i; hkey := _jd_array_key(bh, setkeys);
+                        if counts then
+                            if (bmap ? hkey) then
+                                bmap := jsonb_set(bmap, array [hkey], to_jsonb(((bmap ->> hkey)::int + 1)), true);
+                            else
+                                bmap := jsonb_set(bmap, array [hkey], to_jsonb(1), true);
+                            end if;
+                        else
+                            if not (bmap ? hkey) then bmap := jsonb_set(bmap, array [hkey], bh, true); end if;
+                        end if;
+                        i := i + 1;
+                    end loop;
+
+                -- For setkeys and objects present in both, recurse into changed objects
+                if setkeys is not null then
+                    for hkey in select key
+                                from (select key
+                                      from jsonb_object_keys(amap) as key
+                                      intersect
+                                      select key
+                                      from jsonb_object_keys(bmap) as key) s
+                                order by 1
+                        loop
+                            ah := amap -> hkey; bh := bmap -> hkey;
+                            -- when counts, value is count. fetch real objects from original arrays by searching first match
+                            if counts then
+                                -- find representative objects for this key from arrays
+                                ah := null; bh := null;
+                                i := 0;
+                                while i < la and ah is null
+                                    loop
+                                        if _jd_array_key(a -> i, setkeys) = hkey then ah := a -> i; end if; i := i + 1;
+                                    end loop;
+                                i := 0;
+                                while i < lb and bh is null
+                                    loop
+                                        if _jd_array_key(b -> i, setkeys) = hkey then bh := b -> i; end if; i := i + 1;
+                                    end loop;
+                            end if;
+                            -- For identity-matched objects, emit shallow field replacements for differing scalar fields
+                            if ah is distinct from bh then
+                                declare
+                                    kk    text;
+                                    aval  jsonb;
+                                    bval  jsonb;
+                                    ipath jsonb := coalesce(cur_path, '[]'::jsonb) ||
+                                                   jsonb_build_array(_jd_object_identity(ah, setkeys));
+                                begin
+                                    for kk in select key
+                                              from (select key
+                                                    from jsonb_object_keys(ah) as key
+                                                    union
+                                                    select key
+                                                    from jsonb_object_keys(bh) as key) u
+                                              order by 1
+                                        loop
+                                            aval := ah -> kk; bval := bh -> kk;
+                                            if aval is null or bval is null then
+                                                -- additions/removals at fields are not required by current edge case; skip to keep scope tight
+                                                continue;
+                                            end if;
+                                            if jsonb_typeof(aval) <> 'object' and jsonb_typeof(aval) <> 'array' and
+                                               jsonb_typeof(bval) <> 'object' and
+                                               jsonb_typeof(bval) <> 'array' and
+                                               not _jd_json_equal(aval, bval, loc_opts) then
+                                                elem :=
+                                                        row (row (false)::jd_metadata, coalesce(options, '[]'::jsonb), ipath || jsonb_build_array(to_jsonb(kk)), null, array [aval], array [bval], null);
+                                                return next elem; elem := null;
+                                            end if;
+                                        end loop;
+                                end;
+                            end if;
+                        end loop;
+                    -- handle multiplicity for setkeys: remove extra duplicates in A beyond presence in B
+                    declare
+                        countsA jsonb := '{}'::jsonb;
+                        ca      int;
+                        cb      int;
+                        need    int;
+                    begin
+                        -- build counts in A by identity key
+                        i := 0;
+                        while i < la
+                            loop
+                                hkey := _jd_array_key(a -> i, setkeys);
+                                if (countsA ? hkey) then
+                                    countsA := jsonb_set(countsA, array [hkey], to_jsonb(((countsA ->> hkey)::int + 1)),
+                                                         true);
+                                else
+                                    countsA := jsonb_set(countsA, array [hkey], to_jsonb(1), true);
+                                end if;
+                                i := i + 1;
+                            end loop;
+                        for hkey in select key from jsonb_object_keys(countsA) as key
+                            loop
+                                ca := (countsA ->> hkey)::int;
+                                cb := case when (bmap ? hkey) then 1 else 0 end; -- presence only for set semantics
+                                need := ca - cb;
+                                if need > 0 then
+                                    -- remove from the end to match expected index positions
+                                    i := la - 1;
+                                    while i >= 0 and need > 0
+                                        loop
+                                            if _jd_array_key(a -> i, setkeys) = hkey then
+                                                elem :=
+                                                        row (row (false)::jd_metadata, coalesce(options, '[]'::jsonb), coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(i)), null, array [a -> i], null, null);
+                                                return next elem; elem := null;
+                                                need := need - 1;
+                                            end if;
+                                            i := i - 1;
+                                        end loop;
+                                end if;
+                            end loop;
+                    end;
+                    return; -- completed setkeys handling
+                end if;
+
+                -- For MULTISET (bag) or pure SET of scalars (no setkeys), emit removals/additions here and return.
+                if counts or setkeys is null then
+                    elem.metadata := row (false)::jd_metadata;
+                    elem.options := coalesce(options, '[]'::jsonb);
+                    -- path segment differs for SET vs MULTISET
+                    if counts then
+                        elem.path := coalesce(cur_path, '[]'::jsonb) || jsonb_build_array('[]'::jsonb);
+                    else
+                        elem.path := coalesce(cur_path, '[]'::jsonb) || jsonb_build_array('{}'::jsonb);
+                    end if;
+                    elem.before := null; elem.after := null; elem.remove := null; elem.add := null;
+
+                    -- removals
+                    for hkey in select key from jsonb_object_keys(amap) as key order by 1
+                        loop
+                            if counts then
+                                declare
+                                    ca  int := (amap ->> hkey)::int;
+                                    cb  int := coalesce((bmap ->> hkey)::int, 0);
+                                    j   int;
+                                    val jsonb;
+                                begin
+                                    if ca > cb then
+                                        -- recover value to output
+                                        val := null;
+                                        if setkeys is not null then
+                                            i := 0;
+                                            while i < la and val is null
+                                                loop
+                                                    if _jd_array_key(a -> i, setkeys) = hkey then val := a -> i; end if;
+                                                    i := i + 1;
+                                                end loop;
+                                        else
+                                            -- for scalars, key is value::text; rebuild by casting text to jsonb
+                                            val := (hkey)::jsonb; -- hkey is text-form JSON
+                                        end if;
+                                        j := 1;
+                                        while j <= (ca - cb)
+                                            loop
+                                                if elem.remove is null then
+                                                    elem.remove := array [val];
+                                                else
+                                                    elem.remove := array_cat(elem.remove, array [val]);
+                                                end if;
+                                                j := j + 1;
+                                            end loop;
+                                    end if;
+                                end;
+                            else
+                                if not (bmap ? hkey) then
+                                    -- set scalar removal, collect under [] path
+                                    if elem.remove is null then
+                                        elem.remove := array [(hkey)::jsonb];
+                                    else
+                                        elem.remove := array_cat(elem.remove, array [(hkey)::jsonb]);
+                                    end if;
+                                end if;
+                            end if;
+                        end loop;
+
+                    -- additions
+                    for hkey in select key from jsonb_object_keys(bmap) as key order by 1
+                        loop
+                            if counts then
+                                declare
+                                    ca  int := coalesce((amap ->> hkey)::int, 0);
+                                    cb  int := (bmap ->> hkey)::int;
+                                    j   int;
+                                    val jsonb;
+                                begin
+                                    if cb > ca then
+                                        val := null;
+                                        if setkeys is not null then
+                                            i := 0;
+                                            while i < lb and val is null
+                                                loop
+                                                    if _jd_array_key(b -> i, setkeys) = hkey then val := b -> i; end if;
+                                                    i := i + 1;
+                                                end loop;
+                                        else
+                                            val := (hkey)::jsonb;
+                                        end if;
+                                        j := 1;
+                                        while j <= (cb - ca)
+                                            loop
+                                                if elem.add is null then
+                                                    elem.add := array [val];
+                                                else
+                                                    elem.add := array_cat(elem.add, array [val]);
+                                                end if; j := j + 1;
+                                            end loop;
+                                    end if;
+                                end;
+                            else
+                                if not (amap ? hkey) then
+                                    if elem.add is null then
+                                        elem.add := array [(hkey)::jsonb];
+                                    else
+                                        elem.add := array_cat(elem.add, array [(hkey)::jsonb]);
+                                    end if;
+                                end if;
+                            end if;
+                        end loop;
+
+                    -- emit combined hunk if present
+                    if elem.path is not null and (elem.remove is not null or elem.add is not null) then
+                        return next elem;
+                    end if;
+                    return;
+                end if;
+                -- When setkeys are present (set of objects) we defer multiplicity changes to index-based diff.
+            end;
+        end if;
+
+        -- index-based array diff with common prefix/suffix trimming
+        -- When setkeys are active, all handling is done above; do not fall through to index window logic
+        if _jd_option_get_setkeys(loc_opts) is not null then return; end if;
+        la := coalesce(jsonb_array_length(a), 0);
+        lb := coalesce(jsonb_array_length(b), 0);
+        p := 0;
+        -- common prefix
+        while p < least(la, lb)
+            loop
+                if not _jd_json_equal(a -> p, b -> p, loc_opts) then exit; end if;
+                p := p + 1;
+            end loop;
+        -- common suffix (avoid overlap with prefix)
+        -- When setkeys are active, avoid suffix trimming so trailing multiplicity changes become explicit removals/additions.
+        if _jd_option_get_setkeys(loc_opts) is null then
+            s := 0; i := 0;
+            while (p + s) < la and (p + s) < lb
+                loop
+                    if not _jd_json_equal(a -> (la - 1 - i), b -> (lb - 1 - i), loc_opts) then exit; end if;
+                    s := s + 1; i := i + 1;
+                end loop;
+        else
+            s := 0;
+        end if;
+
+        wa := la - p - s; -- window size in a
+        wb := lb - p - s; -- window size in b
+
+        if wa = 0 and wb = 0 then
+            return; -- arrays equal (should have been caught earlier)
+        end if;
+
+        -- Emit a single hunk for the changed window at index p with context before/after
+        elem.metadata := row (false)::jd_metadata;
+        elem.options := coalesce(options, '[]'::jsonb);
+        elem.path := coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(p));
+
+        -- before context: omit context when setkeys are active; otherwise include previous or OPEN marker
+        if _jd_option_get_setkeys(loc_opts) is not null then
+            elem.before := null;
+        else
+            if p > 0 then
+                elem.before := array [a -> (p - 1)];
+            else
+                elem.before := array [to_jsonb('__OPEN__'::text)];
+            end if;
+        end if;
+
+        -- window removals (all elements in a's window, in order)
+        if wa > 0 then
+            elem.remove := null; -- build incrementally
+            i := p;
+            while i <= (p + wa - 1)
+                loop
+                    if elem.remove is null or array_length(elem.remove, 1) is null then
+                        elem.remove := array [a -> i];
+                    else
+                        elem.remove := array_cat(elem.remove, array [a -> i]);
+                    end if;
+                    i := i + 1;
+                end loop;
+        else
+            elem.remove := null;
+        end if;
+
+        -- window additions (all elements in b's window, in order)
+        if wb > 0 then
+            elem.add := null;
+            i := p;
+            while i <= (p + wb - 1)
+                loop
+                    if elem.add is null or array_length(elem.add, 1) is null then
+                        elem.add := array [b -> i];
+                    else
+                        elem.add := array_cat(elem.add, array [b -> i]);
+                    end if;
+                    i := i + 1;
+                end loop;
+        else
+            elem.add := null;
+        end if;
+
+        -- after context: omit when setkeys are active; else include next element or CLOSE marker
+        if _jd_option_get_setkeys(loc_opts) is not null then
+            elem.after := null;
+        else
+            if s > 0 then
+                elem.after := array [a -> (la - s)];
+            else
+                elem.after := array [to_jsonb('__CLOSE__'::text)];
+            end if;
+        end if;
+
+        return next elem;
+        return;
+    end if;
+
+    -- Fallback: single hunk at current path
+    elem.metadata := row (false)::jd_metadata;
+    elem.options := coalesce(options, '[]'::jsonb);
+    elem.path := coalesce(cur_path, '[]'::jsonb);
+    elem.before := null;
+    elem.remove := array [a];
+    elem.add := array [b];
+    elem.after := null;
+    return next elem;
+end
 $$;
 
-COMMENT ON FUNCTION jd_patch(jsonb, jsonb, jsonb) IS 'Apply a simplified jd-like diff operation array to a JSONB value. Options parameter accepted for signature compatibility.';
+create or replace function jd_diff_struct(a jsonb, b jsonb, options jd_option default '[]'::jsonb) returns setof jd_diff_element
+    language plpgsql
+    stable as
+$$
+declare
+    opt jd_option := options;
+begin
+    return query select * from _jd_diff_struct(a, b, '[]'::jsonb, opt) d where _jd_diff_allowed(d.path, opt);
+end
+$$;
+
+create or replace function jd_render_diff_text(diff_elements jd_diff_element[],
+                                               options jd_option default '[]'::jsonb) returns text
+    language plpgsql
+    stable as
+$$
+declare
+    out       text := '';
+    i         int  := 1;
+    n         int  := coalesce(array_length(diff_elements, 1), 0);
+    e         jd_diff_element;
+    v         jsonb;
+    path_text text;
+    opt       jsonb;
+    seg       jsonb;
+    j         int;
+begin
+    -- if no diffs, return empty string (no headers)
+    if n = 0 then return ''; end if;
+    -- render option header lines if provided and there are diffs
+    if options is not null and jsonb_typeof(options) = 'array' and jsonb_array_length(options) > 0 then
+        for opt in select x from jsonb_array_elements(options) as t(x)
+            loop
+                out := out || '^ ' || _jd_render_json_compact(opt) || E'\n';
+            end loop;
+    end if;
+    while i <= n
+        loop
+            e := diff_elements[i];
+            -- render path compactly using compact segment renderer
+            if e.path is null or jsonb_typeof(e.path) <> 'array' then
+                path_text := '[]';
+            else
+                path_text := '[';
+                j := 0;
+                while j < jsonb_array_length(e.path)
+                    loop
+                        seg := e.path -> j;
+                        if j > 0 then path_text := path_text || ','; end if;
+                        path_text := path_text || _jd_render_json_compact(seg);
+                        j := j + 1;
+                    end loop;
+                path_text := path_text || ']';
+            end if;
+            out := out || '@ ' || path_text || E'\n';
+            -- optional context before
+            if e.before is not null then
+                foreach v in array e.before
+                    loop
+                        if v = to_jsonb('__OPEN__'::text) then
+                            out := out || E'[\n';
+                        else
+                            out := out || '  ' || _jd_render_json_compact(v) || E'\n';
+                        end if;
+                    end loop;
+            end if;
+            if e.remove is not null then
+                foreach v in array e.remove
+                    loop
+                        out := out || '- ' || _jd_render_json_compact(v) || E'\n';
+                    end loop;
+            end if;
+            if e.add is not null then
+                foreach v in array e.add
+                    loop
+                        out := out || '+ ' || _jd_render_json_compact(v) || E'\n';
+                    end loop;
+            end if;
+            -- optional context after
+            if e.after is not null then
+                foreach v in array e.after
+                    loop
+                        if v = to_jsonb('__CLOSE__'::text) then
+                            out := out || E']\n';
+                        else
+                            out := out || '  ' || _jd_render_json_compact(v) || E'\n';
+                        end if;
+                    end loop;
+            end if;
+            i := i + 1;
+        end loop;
+    return out;
+end
+$$;
+
+create or replace function jd_diff_text(a jsonb, b jsonb, options jd_option default '[]'::jsonb) returns text
+    language plpgsql
+    stable as
+$$
+declare
+    elems jd_diff_element[];
+begin
+    select array_agg(d) into elems from jd_diff_struct(a, b, options) as d;
+    if elems is null or array_length(elems, 1) is null then return ''; end if;
+    return jd_render_diff_text(elems, options);
+end
+$$;
+
+-- Milestone 6: format-aware diff wrapper
+create or replace function jd_diff(a jsonb, b jsonb, options jd_option,
+                                   format jd_diff_format default 'jd') returns jsonb
+    language plpgsql
+    stable as
+$$
+declare
+    t text;
+begin
+    if format = 'jd' then
+        t := jd_diff_text(a, b, options);
+        return to_jsonb(t);
+    elsif format = 'patch' then
+        return jd_diff_patch(a, b, options);
+    elsif format = 'merge' then
+        return jd_diff_merge(a, b, options);
+    else
+        raise exception 'jd_diff: unknown format %', format;
+    end if;
+end
+$$;
+
+-- Note: Only 4-arg jd_diff(a,b,options,format) is supported from Milestone 6 onward.
+
+-- Milestone 6: translation helper stub (jd-involved flows only in this milestone)
+create or replace function jd_translate_diff_format(diff_content jsonb, input_format jd_diff_format,
+                                                    output_format jd_diff_format) returns jsonb
+    language plpgsql
+    stable as
+$$
+declare
+    elems jd_diff_element[];
+    t     text;
+begin
+    -- No-op when formats identical
+    if input_format = output_format then return diff_content; end if;
+
+    -- Normalize input to struct elements
+    if input_format = 'jd' then
+        t := _jd_jsonb_string_value(diff_content);
+        elems := _jd_read_diff_text(t);
+    elsif input_format = 'patch' then
+        elems := jd_read_diff_patch(diff_content);
+    elsif input_format = 'merge' then
+        elems := jd_read_diff_merge(diff_content);
+    else
+        raise exception 'jd_translate_diff_format: unknown input format %', input_format;
+    end if;
+
+    if elems is null or array_length(elems, 1) is null then
+        -- empty diff translates to empty in any format
+        if output_format = 'jd' then
+            return to_jsonb(''::text);
+        elsif output_format = 'patch' then
+            return '[]'::jsonb;
+        elsif output_format = 'merge' then
+            return '{}'::jsonb;
+        end if;
+    end if;
+
+    -- Render to desired output
+    if output_format = 'jd' then
+        -- include MERGE header when elements originated from merge
+        if input_format = 'merge' then
+            t := jd_render_diff_text(elems, '[
+              "MERGE"
+            ]'::jsonb);
+        else
+            t := jd_render_diff_text(elems, '[]'::jsonb);
+        end if;
+        return to_jsonb(t);
+    elsif output_format = 'patch' then
+        return jd_render_diff_patch(elems);
+    elsif output_format = 'merge' then
+        return jd_render_diff_merge(elems);
+    else
+        raise exception 'jd_translate_diff_format: unknown output format %', output_format;
+    end if;
+end
+$$;
+
+-- Minimal RFC 6902 applier: supports /key at root for add/remove/replace
+create or replace function jd_apply_patch(value jsonb, patch jd_patch) returns jsonb
+    language plpgsql
+    stable as
+$$
+declare
+    cur jsonb := value;
+    op  jsonb;
+    o   text;
+    p   text;
+    key text;
+    val jsonb;
+begin
+    if jsonb_typeof(patch) <> 'array' then raise exception 'jd_apply_patch expects array'; end if;
+    for op in select e from jsonb_array_elements(patch) as z(e)
+        loop
+            o := op ->> 'op'; p := op ->> 'path'; val := op -> 'value';
+            if p is null or left(p, 1) <> '/' or position('/' in substr(p, 2)) > 0 then
+                raise exception 'unsupported path % (only /key supported)', p;
+            end if;
+            key := substr(p, 2);
+            if o = 'remove' then
+                if jsonb_typeof(cur) <> 'object' then raise exception 'remove requires object root'; end if;
+                cur := cur - key;
+            elsif o = 'add' or o = 'replace' then
+                if jsonb_typeof(cur) <> 'object' then raise exception '% requires object root', o; end if;
+                cur := jsonb_set(cur, array [key], val, true);
+            else
+                raise exception 'unsupported op %', o;
+            end if;
+        end loop;
+    return cur;
+end
+$$;
+
+-- --------------------------------------------------------------------------------
+-- Remaining API stubs (to be implemented in later milestones)
+-- --------------------------------------------------------------------------------
+-- Path helper: convert jd_path (jsonb array) to RFC6901 pointer
+create or replace function _jd_path_to_pointer(path jd_path) returns text
+    language plpgsql
+    immutable as
+$$
+declare
+    i   int  := 0;
+    n   int;
+    out text := '';
+    v   jsonb;
+    seg text;
+begin
+    n := coalesce(jsonb_array_length(path), 0);
+    while i < n
+        loop
+            v := path -> i;
+            if jsonb_typeof(v) = 'string' then
+                seg := v::text;
+                seg := substr(seg, 2, length(seg) - 2);
+                seg := replace(replace(seg, '~', '~0'), '/', '~1');
+                out := out || '/' || seg;
+            elsif jsonb_typeof(v) = 'number' then
+                out := out || '/' || (v::text);
+            else
+                out := out || '/' || replace(replace(v::text, '~', '~0'), '/', '~1');
+            end if;
+            i := i + 1;
+        end loop;
+    return out;
+end
+$$;
+
+-- Render RFC 6902 JSON Patch from diff struct
+create or replace function jd_render_diff_patch(diff_elements jd_diff_element[]) returns jd_patch
+    language plpgsql
+    stable as
+$$
+declare
+    ops           jsonb := '[]'::jsonb;
+    i             int   := 1;
+    n             int   := coalesce(array_length(diff_elements, 1), 0);
+    e             jd_diff_element;
+    p             text;
+    last          jsonb;
+    last_is_index boolean;
+    j             int;
+    cnt           int;
+begin
+    while i <= n
+        loop
+            e := diff_elements[i];
+            p := _jd_path_to_pointer(e.path);
+            if coalesce(jsonb_array_length(e.path), 0) > 0 then
+                last := e.path -> (jsonb_array_length(e.path) - 1);
+                last_is_index := (jsonb_typeof(last) = 'number');
+            else
+                last_is_index := false;
+            end if;
+
+            if e.before is null and e.after is null then
+                if e.remove is not null and e.add is not null and array_length(e.remove, 1) = 1 and
+                   array_length(e.add, 1) = 1 then
+                    -- emit test + remove + add (upstream format expectations)
+                    ops := ops || jsonb_build_array(jsonb_build_object('op', 'test', 'path', p, 'value', e.remove[1]));
+                    ops := ops ||
+                           jsonb_build_array(jsonb_build_object('op', 'remove', 'path', p, 'value', e.remove[1]));
+                    ops := ops || jsonb_build_array(jsonb_build_object('op', 'add', 'path', p, 'value', e.add[1]));
+                elsif e.remove is not null and array_length(e.remove, 1) = 1 and e.add is null then
+                    ops := ops || jsonb_build_array(jsonb_build_object('op', 'test', 'path', p, 'value', e.remove[1]));
+                    ops := ops ||
+                           jsonb_build_array(jsonb_build_object('op', 'remove', 'path', p, 'value', e.remove[1]));
+                elsif e.add is not null and array_length(e.add, 1) = 1 and e.remove is null then
+                    ops := ops || jsonb_build_array(jsonb_build_object('op', 'add', 'path', p, 'value', e.add[1]));
+                end if;
+            else
+                if last_is_index then
+                    -- deletions at index path
+                    if e.remove is not null and array_length(e.remove, 1) is not null then
+                        cnt := array_length(e.remove, 1);
+                        j := 1;
+                        while j <= cnt
+                            loop
+                                ops := ops ||
+                                       jsonb_build_array(jsonb_build_object('op', 'test', 'path', p, 'value', e.remove[j]));
+                                ops := ops ||
+                                       jsonb_build_array(jsonb_build_object('op', 'remove', 'path', p, 'value', e.remove[j]));
+                                j := j + 1;
+                            end loop;
+                    end if;
+                    -- additions at index path (append if e.after indicates close and not a replacement)
+                    if e.add is not null and array_length(e.add, 1) is not null then
+                        cnt := array_length(e.add, 1); j := 1;
+                        while j <= cnt
+                            loop
+                                -- If this hunk also has removals, treat as in-place replacements at index path
+                                if e.remove is not null and array_length(e.remove, 1) is not null then
+                                    ops := ops ||
+                                           jsonb_build_array(jsonb_build_object('op', 'add', 'path', p, 'value', e.add[j]));
+                                elsif e.after is not null and array_length(e.after, 1) is not null and
+                                      e.after[1] = to_jsonb('__CLOSE__'::text) then
+                                    ops := ops || jsonb_build_array(jsonb_build_object('op', 'add', 'path',
+                                                                                       coalesce(nullif(p, ''), '') ||
+                                                                                       '/-', 'value', e.add[j]));
+                                else
+                                    ops := ops ||
+                                           jsonb_build_array(jsonb_build_object('op', 'add', 'path', p, 'value', e.add[j]));
+                                end if;
+                                j := j + 1;
+                            end loop;
+                    end if;
+                end if;
+            end if;
+            i := i + 1;
+        end loop;
+    return ops;
+end
+$$;
+
+create or replace function jd_diff_patch(a jsonb, b jsonb, options jd_option default '[]'::jsonb) returns jd_patch
+    language plpgsql
+    stable as
+$$
+declare
+    elems jd_diff_element[];
+begin
+    select array_agg(d) into elems from jd_diff_struct(a, b, options) as d;
+    if elems is null or array_length(elems, 1) is null then return '[]'::jsonb; end if;
+    return jd_render_diff_patch(elems);
+end
+$$;
+
+-- Render RFC 7386 Merge Patch from diff struct (objects only at leaf keys)
+create or replace function jd_render_diff_merge(diff_elements jd_diff_element[]) returns jd_merge
+    language plpgsql
+    stable as
+$$
+declare
+    out jsonb := '{}'::jsonb;
+    i   int   := 1;
+    n   int   := coalesce(array_length(diff_elements, 1), 0);
+    e   jd_diff_element;
+begin
+    while i <= n
+        loop
+            e := diff_elements[i];
+            if coalesce(jsonb_array_length(e.path), 0) > 0 and
+               jsonb_typeof(e.path -> (jsonb_array_length(e.path) - 1)) = 'string' then
+                if e.add is not null and array_length(e.add, 1) = 1 then
+                    out := jsonb_set(out, (select array_agg(val)
+                                           from jsonb_array_elements_text(e.path) t(val)), e.add[1], true);
+                elsif e.remove is not null and array_length(e.remove, 1) = 1 and e.add is null then
+                    out := jsonb_set(out, (select array_agg(val)
+                                           from jsonb_array_elements_text(e.path) t(val)), 'null'::jsonb, true);
+                end if;
+            end if;
+            i := i + 1;
+        end loop;
+    return out;
+end
+$$;
+
+create or replace function jd_diff_merge(a jsonb, b jsonb, options jd_option default '[]'::jsonb) returns jd_merge
+    language plpgsql
+    stable as
+$$
+declare
+    elems jd_diff_element[];
+begin
+    select array_agg(d) into elems from jd_diff_struct(a, b, options) as d;
+    if elems is null or array_length(elems, 1) is null then return '{}'::jsonb; end if;
+    return jd_render_diff_merge(elems);
+end
+$$;
+
+-- Apply struct elements (objects at leaf keys)
+create or replace function jd_patch_struct(value jsonb, diff_elements jd_diff_element[]) returns jsonb
+    language plpgsql
+    stable as
+$$
+declare
+    cur           jsonb := value;
+    i             int   := 1;
+    n             int   := coalesce(array_length(diff_elements, 1), 0);
+    e             jd_diff_element;
+    last          jsonb;
+    idx           int;
+    parent_path   text[];
+    full_path     text[];
+    arr           jsonb;
+    prev_expected jsonb;
+    next_expected jsonb;
+    prev_actual   jsonb;
+    next_actual   jsonb;
+    v             jsonb;
+begin
+    while i <= n
+        loop
+            e := diff_elements[i];
+            if coalesce(jsonb_array_length(e.path), 0) = 0 then
+                if e.add is not null and array_length(e.add, 1) = 1 then cur := e.add[1]; end if;
+            elsif jsonb_typeof(e.path -> (jsonb_array_length(e.path) - 1)) = 'string' then
+                if e.add is not null and array_length(e.add, 1) = 1 then
+                    cur := jsonb_set(cur, (select array_agg(val)
+                                           from jsonb_array_elements_text(e.path) t(val)), e.add[1], true);
+                elsif e.remove is not null and e.add is null then
+                    -- set null then remove if top-level
+                    cur := jsonb_set(cur, (select array_agg(val)
+                                           from jsonb_array_elements_text(e.path) t(val)), 'null'::jsonb, true);
+                    if jsonb_array_length(e.path) = 1 then cur := cur - (e.path ->> 0); end if;
+                end if;
+            elsif jsonb_typeof(e.path -> (jsonb_array_length(e.path) - 1)) = 'number' then
+                -- Array index context: support in-place replacement with optional simple context checks
+                last := e.path -> (jsonb_array_length(e.path) - 1);
+                idx := (last::text)::int;
+                -- zero-based index
+                -- Build full and parent paths as text[]
+                select array_agg(val) into full_path from jsonb_array_elements_text(e.path) t(val);
+                if jsonb_array_length(e.path) > 1 then
+                    select array_agg(val)
+                    into parent_path
+                    from jsonb_array_elements_text(e.path - (jsonb_array_length(e.path) - 1)) t(val);
+                else
+                    parent_path := array []::text[];
+                end if;
+                -- Extract current array at parent
+                if array_length(parent_path, 1) is null or array_length(parent_path, 1) = 0 then
+                    arr := cur;
+                else
+                    arr := cur #> parent_path;
+                end if;
+                if jsonb_typeof(arr) <> 'array' then
+                    raise exception 'jd_patch_struct: expected array at %, got %', parent_path, jsonb_typeof(arr);
+                end if;
+                -- Optional context: last non-marker from before serves as previous element expectation
+                prev_expected := null;
+                if e.before is not null and array_length(e.before, 1) is not null then
+                    foreach v in array e.before
+                        loop
+                            if v <> to_jsonb('__OPEN__'::text) then prev_expected := v; end if;
+                        end loop;
+                end if;
+                next_expected := null;
+                if e.after is not null and array_length(e.after, 1) is not null then
+                    foreach v in array e.after
+                        loop
+                            if v <> to_jsonb('__CLOSE__'::text) then
+                                if next_expected is null then next_expected := v; end if;
+                            end if;
+                        end loop;
+                end if;
+                -- Actual neighbors
+                if idx > 0 then prev_actual := arr -> (idx - 1); else prev_actual := null; end if;
+                if (idx + 1) < coalesce((arr ->> '#')::int, jsonb_array_length(arr)) then
+                    next_actual := arr -> (idx + 1);
+                else
+                    next_actual := null;
+                end if;
+                if prev_expected is not null and prev_actual is not null and prev_actual <> prev_expected then
+                    raise exception 'jd_patch_struct: context mismatch before index %: expected %, got %', idx, prev_expected, prev_actual;
+                end if;
+                if next_expected is not null and next_actual is not null and next_actual <> next_expected then
+                    raise exception 'jd_patch_struct: context mismatch after index %: expected %, got %', idx, next_expected, next_actual;
+                end if;
+                -- Replacement: require remove match when provided
+                if e.remove is not null and array_length(e.remove, 1) is not null then
+                    if (cur #> full_path) <> e.remove[1] then
+                        raise exception 'jd_patch_struct: value mismatch at index %', idx;
+                    end if;
+                end if;
+                if e.add is not null and array_length(e.add, 1) is not null then
+                    -- Use create_missing=true to ensure array element is updated
+                    cur := jsonb_set(cur, full_path, e.add[1], true);
+                elsif e.remove is not null and (e.add is null or array_length(e.add, 1) is null) then
+                    -- pure removal at index: rebuild array without element at idx
+                    declare
+                        j      int   := 0;
+                        newarr jsonb := '[]'::jsonb;
+                        len    int;
+                        elem   jsonb;
+                    begin
+                        len := jsonb_array_length(arr);
+                        while j < len
+                            loop
+                                if j <> idx then
+                                    elem := arr -> j;
+                                    newarr := newarr || jsonb_build_array(elem);
+                                end if;
+                                j := j + 1;
+                            end loop;
+                        if array_length(parent_path, 1) is null or array_length(parent_path, 1) = 0 then
+                            cur := newarr;
+                        else
+                            cur := jsonb_set(cur, parent_path, newarr, false);
+                        end if;
+                    end;
+                end if;
+            end if;
+            i := i + 1;
+        end loop;
+    return cur;
+end
+$$;
+
+-- Parse jd native diff text into structured elements (array form)
+create or replace function _jd_read_diff_text(diff_text text) returns jd_diff_element[]
+    language plpgsql
+    stable as
+$$
+declare
+    lines       text[]            := string_to_array(coalesce(diff_text, ''), E'\n');
+    i           int               := 1;
+    n           int               := coalesce(array_length(lines, 1), 0);
+    cur         jd_diff_element;
+    out         jd_diff_element[] := array []::jd_diff_element[];
+    opts        jsonb             := '[]'::jsonb;
+    line        text;
+    trimmed     text;
+    val         jsonb;
+    started     boolean           := false; -- saw a header '@'
+    has_changes boolean           := false; -- saw +/- line
+begin
+    while i <= n
+        loop
+            line := lines[i];
+            -- skip empty lines (e.g., trailing newline)
+            if line is null or line = '' then i := i + 1; continue; end if;
+
+            if left(line, 2) = '^ ' then
+                -- option line before first hunk
+                val := (substr(line, 3))::jsonb;
+                opts := opts || jsonb_build_array(val);
+            elsif left(line, 2) = '@ ' then
+                -- finalize previous element if any
+                if started then
+                    if cur.options is null then cur.options := opts; end if;
+                    out := out || array [cur];
+                end if;
+                -- start new element
+                started := true; has_changes := false;
+                cur.metadata := row (false)::jd_metadata;
+                cur.options := opts; -- capture global options into element
+                cur.path := (substr(line, 3))::jsonb; -- path is compact JSON array
+                cur.before := null; cur.remove := null; cur.add := null; cur.after := null;
+            elsif left(line, 2) = '- ' then
+                val := (substr(line, 3))::jsonb;
+                if cur.remove is null then
+                    cur.remove := array [val];
+                else
+                    cur.remove := cur.remove || array [val];
+                end if;
+                has_changes := true;
+            elsif left(line, 2) = '+ ' then
+                val := (substr(line, 3))::jsonb;
+                if cur.add is null then cur.add := array [val]; else cur.add := cur.add || array [val]; end if;
+                has_changes := true;
+            else
+                -- context lines: either '[' or ']' or '  <json>'
+                trimmed := btrim(line);
+                if trimmed = '[' then
+                    val := to_jsonb('__OPEN__'::text);
+                elsif trimmed = ']' then
+                    val := to_jsonb('__CLOSE__'::text);
+                else
+                    -- expect two-space indent followed by compact json
+                    if left(line, 2) = '  ' then
+                        val := (substr(line, 3))::jsonb;
+                    else
+                        raise exception 'Invalid diff text line (expected context with two-space indent): %', line;
+                    end if;
+                end if;
+                if not has_changes then
+                    if cur.before is null then
+                        cur.before := array [val];
+                    else
+                        cur.before := cur.before || array [val];
+                    end if;
+                else
+                    if cur.after is null then
+                        cur.after := array [val];
+                    else
+                        cur.after := cur.after || array [val];
+                    end if;
+                end if;
+            end if;
+            i := i + 1;
+        end loop;
+    if started then
+        if cur.options is null then cur.options := opts; end if;
+        out := out || array [cur];
+    end if;
+    return out;
+end
+$$;
+
+create or replace function jd_read_diff_text(diff_text text) returns setof jd_diff_element
+    language plpgsql
+    stable as
+$$
+declare
+    arr jd_diff_element[];
+    e   jd_diff_element;
+begin
+    arr := _jd_read_diff_text(diff_text);
+    if arr is null or array_length(arr, 1) is null then return; end if;
+    foreach e in array arr
+        loop
+            return next e;
+        end loop;
+end
+$$;
+
+-- Helpers for translation/parsing
+create or replace function _jd_jsonb_string_value(j jsonb) returns text
+    language plpgsql
+    immutable as
+$$
+declare
+    t text;
+begin
+    if j is null then return null; end if;
+    if jsonb_typeof(j) <> 'string' then raise exception 'Expected JSON string content for jd format'; end if;
+    t := j::text; -- quoted JSON string
+    t := substr(t, 2, greatest(0, length(t) - 2));
+    return _jd_unescape_json_string(t);
+end
+$$;
+
+-- Unescape JSON string escapes to raw text (handles \n, \r, \t, \", \\)
+create or replace function _jd_unescape_json_string(s text) returns text
+    language plpgsql
+    immutable as
+$$
+declare
+    r text := s;
+begin
+    if r is null then return null; end if;
+    -- First collapse escaped backslashes
+    r := replace(r, E'\\\\', E'\\');
+    -- Then unescape quotes and control sequences
+    r := replace(r, E'\\"', E'"');
+    r := replace(r, E'\\n', E'\n');
+    r := replace(r, E'\\r', E'\r');
+    r := replace(r, E'\\t', E'\t');
+    return r;
+end
+$$;
+
+create or replace function _jd_pointer_to_path(pointer text) returns jd_path
+    language plpgsql
+    immutable as
+$$
+declare
+    parts text[];
+    i     int   := 1;
+    n     int;
+    seg   text;
+    out   jsonb := '[]'::jsonb;
+    num   numeric;
+begin
+    if pointer is null or pointer = '' then return '[]'::jsonb; end if;
+    if left(pointer, 1) <> '/' then raise exception 'Invalid JSON Pointer: %', pointer; end if;
+    parts := string_to_array(substr(pointer, 2), '/');
+    n := coalesce(array_length(parts, 1), 0);
+    while i <= n
+        loop
+            seg := replace(replace(parts[i], '~1', '/'), '~0', '~');
+            begin
+                num := seg::numeric;
+                out := out || to_jsonb(num);
+            exception
+                when others then out := out || to_jsonb(seg);
+            end;
+            i := i + 1;
+        end loop;
+    return out;
+end
+$$;
+
+-- Parse RFC 6902 JSON Patch into jd_diff_element[]
+create or replace function jd_read_diff_patch(patch jd_patch) returns jd_diff_element[]
+    language plpgsql
+    stable as
+$$
+declare
+    ops jsonb;
+    op  jsonb;
+    out jd_diff_element[] := array []::jd_diff_element[];
+    cur jd_diff_element;
+    p   text;
+begin
+    if patch is null or jsonb_typeof(patch) <> 'array' then return null; end if;
+    ops := patch;
+    for op in select e from jsonb_array_elements(ops) as z(e)
+        loop
+            p := op ->> 'path';
+            cur.metadata := row (false)::jd_metadata;
+            cur.options := '[]'::jsonb;
+            cur.path := _jd_pointer_to_path(p);
+            cur.before := null; cur.after := null; cur.remove := null; cur.add := null;
+            if op ->> 'op' = 'add' then
+                cur.add := array [op -> 'value'];
+                out := out || array [cur];
+            elsif op ->> 'op' = 'remove' then
+                if op ? 'value' then
+                    cur.remove := array [op -> 'value'];
+                else
+                    cur.remove := array ['null'::jsonb];
+                end if;
+                out := out || array [cur];
+            elsif op ->> 'op' = 'replace' then
+                if op ? 'value' then cur.add := array [op -> 'value']; end if;
+                -- replacement without prior value: represent as add only
+                out := out || array [cur];
+            else
+                -- ignore test/copy/move for translation into jd text
+                continue;
+            end if;
+        end loop;
+    return out;
+end
+$$;
+
+-- Parse RFC 7386 Merge Patch into jd_diff_element[]
+create or replace function jd_read_diff_merge(merge jd_merge) returns jd_diff_element[]
+    language plpgsql
+    stable as
+$$
+declare
+    k   text;
+    v   jsonb;
+    cur jd_diff_element;
+    out jd_diff_element[] := array []::jd_diff_element[];
+begin
+    if merge is null or jsonb_typeof(merge) <> 'object' then return null; end if;
+    for k, v in select key, value from jsonb_each(merge)
+        loop
+            cur.metadata := row (false)::jd_metadata;
+            cur.options := '[]'::jsonb;
+            cur.path := jsonb_build_array(to_jsonb(k));
+            cur.before := null; cur.after := null; cur.remove := null; cur.add := null;
+            if v is null or v = 'null'::jsonb then
+                -- represent removal as a removal hunk without knowing prior value
+                cur.remove := array ['null'::jsonb];
+            else
+                cur.add := array [v];
+            end if;
+            out := out || array [cur];
+        end loop;
+    return out;
+end
+$$;
+
+-- Apply jd native diff text to a JSONB value via struct applier
+create or replace function jd_patch_text(value jsonb, diff_text text) returns jsonb
+    language plpgsql
+    stable as
+$$
+declare
+    elems jd_diff_element[];
+begin
+    elems := _jd_read_diff_text(diff_text);
+    if elems is null or array_length(elems, 1) is null then return value; end if;
+    return jd_patch_struct(value, elems);
+end
+$$;

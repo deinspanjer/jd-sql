@@ -1,0 +1,8 @@
+<component name="ProjectCodeStyleConfiguration">
+  <code_scheme name="Project" version="173">
+    <PostgresCodeStyleSettings version="7">
+      <option name="USE_GENERAL_STYLE" value="false" />
+      <option name="IMP_DECLARE_EL_WRAP" value="1" />
+    </PostgresCodeStyleSettings>
+  </code_scheme>
+</component>
