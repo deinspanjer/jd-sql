@@ -85,7 +85,7 @@ Comparison and diff creation
 - `jd_diff_patch(a jsonb, b jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS jd_patch`
   - Equivalent to `Diff.RenderPatch()` — RFC 6902 patch as JSONB.
 
-- `jd_diff_merge(a jsonb, b jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS jd_merge`
+ - `jd_diff_merge(a jsonb, b jsonb, options jd_option DEFAULT '[]'::jsonb) RETURNS jd_merge`
   - Equivalent to `Diff.RenderMerge()` — RFC 7386 patch as JSONB.
 
 Patch application
@@ -96,10 +96,10 @@ Patch application
 - `jd_patch_struct(value jsonb, diff_elements jd_diff_element[]) RETURNS jsonb`
   - Apply a structured diff (array form). Users can `array_agg` from a rowset.
 
-- `jd_apply_patch(value jsonb, patch jd_patch) RETURNS jsonb`
+ - `jd_apply_patch(value jsonb, patch jd_patch) RETURNS jsonb`
   - Apply an RFC 6902 JSON Patch to a JSONB value.
-
-Note: Merge patch application helper is not provided in this variant; merge patches are supported for diff output and translation.
+ - `jd_apply_merge(value jsonb, patch jd_merge) RETURNS jsonb`
+  - Apply an RFC 7386 JSON Merge Patch to a JSONB value (objects are merged recursively, arrays and scalars replace; `null` removes a key).
 
 Diff parsing and rendering
 
@@ -211,6 +211,32 @@ select jd_apply_patch(
 );
 -- {"a":2,"b":3}
 ```
+
+MERGE option vs JSON Merge Patch (RFC 7386)
+
+- MERGE is a semantic option that changes how diffs are constructed and how patches apply:
+  - Objects merge recursively.
+  - Arrays replace entirely (no element-wise merge).
+  - Null indicates deletion when applied.
+  - In jd text, MERGE can appear as either `^ "MERGE"` or legacy `^ {"Merge":true}`.
+
+- JSON Merge Patch (RFC 7386) is a serialization format for merge-style patches. It is a single JSON object where keys map to changes, nested objects recurse, arrays replace, and `null` deletes a property.
+
+Relevant SQL entrypoints (PL/pgSQL variant):
+
+- Compute diffs in various formats
+  - `select jd_diff(a, b, options, 'jd')` → jd diff text returned as a JSONB string
+  - `select jd_diff(a, b, options, 'merge')` or `select jd_diff_merge(a, b, options)` → RFC 7386 object
+  - `select jd_diff(a, b, options, 'patch')` or `select jd_diff_patch(a, b, options)` → RFC 6902 array
+
+- Translate between formats
+  - `select jd_translate_diff_format(diff_jsonb, 'merge', 'jd')` includes a MERGE header in the produced jd text.
+  - `select jd_translate_diff_format(diff_jsonb, 'jd', 'merge')` emits RFC 7386 when the jd text contains a MERGE header.
+
+Notes:
+
+- Requesting `'merge'` output implies merge semantics for the produced diff, mirroring upstream jd CLI behavior.
+- Rendering to RFC 7386 requires merge-compatible elements; translation from non-merge diffs to RFC 7386 is limited to leaf property replacements/removals.
 
 Scope and constraints (PL/pgSQL variant)
 

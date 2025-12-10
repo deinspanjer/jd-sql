@@ -10,6 +10,66 @@
     "expected_exit": 0
   },
   {
+    "name": "custom: merge format output for nested object changes",
+    "description": "-f=merge should output RFC 7386 JSON Merge Patch with only changed keys for nested objects",
+    "category": "jd-sql-custom",
+    "args": ["-f=merge"],
+    "content_a": "{\"a\":{\"x\":1,\"y\":2}}",
+    "content_b": "{\"a\":{\"x\":1,\"y\":3,\"z\":4}}",
+    "expected_diff": "{\"a\":{\"y\":3,\"z\":4}}",
+    "expected_exit": 1
+  },
+  {
+    "name": "custom: merge format sets null for deletions",
+    "description": "Under MERGE semantics, deletions render as null in RFC 7386 output",
+    "category": "jd-sql-custom",
+    "args": ["-f=merge"],
+    "content_a": "{\"a\":{\"k\":1,\"m\":2}}",
+    "content_b": "{\"a\":{\"m\":2}}",
+    "expected_diff": "{\"a\":{\"k\":null}}",
+    "expected_exit": 1
+  },
+  {
+    "name": "custom: merge format replaces arrays entirely",
+    "description": "Arrays should be replaced as whole values in RFC 7386 output when changed",
+    "category": "jd-sql-custom",
+    "args": ["-f=merge"],
+    "content_a": "{\"arr\":[1,2,3]}",
+    "content_b": "{\"arr\":[1,2,3,4]}",
+    "expected_diff": "{\"arr\":[1,2,3,4]}",
+    "expected_exit": 1
+  },
+  {
+    "name": "custom: translate merge to jd adds MERGE header",
+    "description": "jd_translate_diff_format should add MERGE option header when converting merge→jd",
+    "category": "jd-sql-custom",
+    "sql_function": "jd_translate_diff_format",
+    "sql_function_args": ["merge", "jd"],
+    "content_a": "{\"a\":{\"y\":3,\"z\":4}}",
+    "expected_diff": "^ \"MERGE\"\n@ [\"a\",\"y\"]\n+ 3\n@ [\"a\",\"z\"]\n+ 4\n",
+    "expected_exit": 1
+  },
+  {
+    "name": "custom: translate jd (MERGE string header) to merge outputs RFC7386",
+    "description": "jd_translate_diff_format should output RFC 7386 when given jd text with MERGE header",
+    "category": "jd-sql-custom",
+    "sql_function": "jd_translate_diff_format",
+    "sql_function_args": ["jd", "merge"],
+    "content_a": "^ \"MERGE\"\n@ [\"a\",\"y\"]\n+ 3\n@ [\"a\",\"z\"]\n+ 4\n",
+    "expected_diff": "{\"a\":{\"y\":3,\"z\":4}}",
+    "expected_exit": 1
+  },
+  {
+    "name": "custom: translate jd (merge obj header) to merge outputs RFC7386",
+    "description": "jd_translate_diff_format should output RFC 7386 when given jd text with MERGE header",
+    "category": "jd-sql-custom",
+    "sql_function": "jd_translate_diff_format",
+    "sql_function_args": ["jd", "merge"],
+    "content_a": "^ {\"Merge\":true}\n@ [\"a\",\"y\"]\n+ 3\n@ [\"a\",\"z\"]\n+ 4\n",
+    "expected_diff": "{\"a\":{\"y\":3,\"z\":4}}",
+    "expected_exit": 1
+  },
+  {
     "name": "custom: jd_equal false when different",
     "description": "Direct call to jd_equal should return false",
     "category": "jd-sql-custom",

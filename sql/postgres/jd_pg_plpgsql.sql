@@ -308,7 +308,7 @@ begin
     for e in select x from jsonb_array_elements(options) as t(x)
         loop
             if jsonb_typeof(e) = 'string' then
-                if e::text in ('"SET"', '"MULTISET"') then out := out || jsonb_build_array(e); end if;
+                if e::text in ('"SET"', '"MULTISET"', '"MERGE"') then out := out || jsonb_build_array(e); end if;
             elsif jsonb_typeof(e) = 'object' then
                 if (not (e ? '@') and not (e ? '^')) then
                     if (e ? 'setkeys') or (e ? 'precision') then out := out || jsonb_build_array(e); end if;
@@ -325,7 +325,7 @@ begin
                         for d in select x from jsonb_array_elements(dir) as t2(x)
                             loop
                                 if jsonb_typeof(d) = 'string' then
-                                    if d::text in ('"SET"', '"MULTISET"') then
+                                    if d::text in ('"SET"', '"MULTISET"', '"MERGE"') then
                                         out := out || jsonb_build_array(d);
                                     end if; -- ignore DIFF_ON/OFF
                                 elsif jsonb_typeof(d) = 'object' then
@@ -571,6 +571,19 @@ begin
     end if;
 
     if jsonb_typeof(a) = 'array' and jsonb_typeof(b) = 'array' then
+        -- If MERGE semantics are enabled at this path, arrays are replaced wholesale
+        if _jd_option_has(loc_opts, 'MERGE') then
+            elem.metadata := row (true)::jd_metadata; -- mark merge semantics awareness
+            elem.options := coalesce(options, '[]'::jsonb);
+            elem.path := coalesce(cur_path, '[]'::jsonb);
+            elem.before := null;
+            elem.remove := null;
+            elem.add := array [b];
+            elem.after := null;
+            return next elem;
+            return;
+        end if;
+
         -- Option: SET/MULTISET or setkeys for arrays
         if _jd_option_has(loc_opts, 'MULTISET') or _jd_option_has(loc_opts, 'SET') or
            _jd_option_get_setkeys(loc_opts) is not null then
@@ -1306,6 +1319,7 @@ end
 $$;
 
 -- Render RFC 7386 Merge Patch from diff struct (objects only at leaf keys)
+-- For array element diffs, RFC 7386 semantics require replacing the entire array.
 create or replace function jd_render_diff_merge(diff_elements jd_diff_element[]) returns jd_merge
     language plpgsql
     stable as
@@ -1321,6 +1335,7 @@ begin
             e := diff_elements[i];
             if coalesce(jsonb_array_length(e.path), 0) > 0 and
                jsonb_typeof(e.path -> (jsonb_array_length(e.path) - 1)) = 'string' then
+                -- Treat presence of an add value as a replacement/addition regardless of remove presence
                 if e.add is not null and array_length(e.add, 1) = 1 then
                     out := jsonb_set(out, (select array_agg(val)
                                            from jsonb_array_elements_text(e.path) t(val)), e.add[1], true);
@@ -1335,6 +1350,7 @@ begin
 end
 $$;
 
+-- Compute RFC 7386 (JSON Merge Patch)
 create or replace function jd_diff_merge(a jsonb, b jsonb, options jd_option default '[]'::jsonb) returns jd_merge
     language plpgsql
     stable as
@@ -1474,6 +1490,46 @@ begin
             i := i + 1;
         end loop;
     return cur;
+end
+$$;
+
+-- Apply RFC 7386 JSON Merge Patch
+create or replace function jd_apply_merge(target jsonb, patch jd_merge) returns jsonb
+    language plpgsql
+    stable as
+$$
+declare
+    result jsonb := target;
+    k      text;
+    v      jsonb;
+    cur    jsonb;
+begin
+    -- If patch is not an object, the result is the patch itself
+    if patch is null or jsonb_typeof(patch) <> 'object' then
+        return patch;
+    end if;
+
+    -- If target is not an object, treat it as an empty object
+    if result is null or jsonb_typeof(result) <> 'object' then
+        result := '{}'::jsonb;
+    end if;
+
+    for k, v in select key, value from jsonb_each(patch)
+        loop
+            if v is null or v = 'null'::jsonb then
+                -- remove key if present
+                result := result - k;
+            elsif jsonb_typeof(v) = 'object' then
+                -- recursively merge objects
+                cur := result -> k;
+                result := jsonb_set(result, array [k], jd_apply_merge(cur, v), true);
+            else
+                -- arrays and scalars replace
+                result := jsonb_set(result, array [k], v, true);
+            end if;
+        end loop;
+
+    return result;
 end
 $$;
 
@@ -1702,26 +1758,50 @@ create or replace function jd_read_diff_merge(merge jd_merge) returns jd_diff_el
     stable as
 $$
 declare
-    k   text;
-    v   jsonb;
-    cur jd_diff_element;
-    out jd_diff_element[] := array []::jd_diff_element[];
+    k    text;
+    v    jsonb;
+    cur  jd_diff_element;
+    out  jd_diff_element[] := array []::jd_diff_element[];
+    keys text[] := array []::text[];
+    i    int := 1;
+    n    int;
+    sub  jd_diff_element[];
+    se   jd_diff_element;
 begin
     if merge is null or jsonb_typeof(merge) <> 'object' then return null; end if;
-    for k, v in select key, value from jsonb_each(merge)
-        loop
+    -- Collect and sort keys for deterministic order
+    select array_agg(key order by key) into keys from jsonb_each(merge);
+    n := coalesce(array_length(keys, 1), 0);
+    while i <= n loop
+        k := keys[i];
+        v := merge -> k;
+        if v is null or v = 'null'::jsonb then
             cur.metadata := row (false)::jd_metadata;
             cur.options := '[]'::jsonb;
             cur.path := jsonb_build_array(to_jsonb(k));
-            cur.before := null; cur.after := null; cur.remove := null; cur.add := null;
-            if v is null or v = 'null'::jsonb then
-                -- represent removal as a removal hunk without knowing prior value
-                cur.remove := array ['null'::jsonb];
-            else
-                cur.add := array [v];
-            end if;
+            cur.before := null; cur.after := null; cur.remove := array ['null'::jsonb]; cur.add := null;
             out := out || array [cur];
-        end loop;
+        elsif jsonb_typeof(v) = 'object' then
+            -- recurse into nested object to produce leaf hunks
+            sub := jd_read_diff_merge(v);
+            if sub is not null and array_length(sub, 1) is not null then
+                foreach se in array sub
+                    loop
+                        -- prefix the path with current key
+                        se.path := jsonb_build_array(to_jsonb(k)) || coalesce(se.path, '[]'::jsonb);
+                        out := out || array [se];
+                    end loop;
+            end if;
+        else
+            -- scalar or array replacement at this key
+            cur.metadata := row (false)::jd_metadata;
+            cur.options := '[]'::jsonb;
+            cur.path := jsonb_build_array(to_jsonb(k));
+            cur.before := null; cur.after := null; cur.remove := null; cur.add := array [v];
+            out := out || array [cur];
+        end if;
+        i := i + 1;
+    end loop;
     return out;
 end
 $$;

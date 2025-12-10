@@ -55,6 +55,34 @@ Notes on return types:
 4. Create and apply structural patches in jd, patch (RFC 6902) and merge (RFC 7386) patch formats.
 5. Translates between patch formats.
 
+### MERGE option vs JSON Merge Patch format (RFC 7386)
+
+Upstream jd distinguishes between:
+
+- MERGE (an option that changes diff/patch semantics):
+  - Objects: merge recursively
+  - Arrays: replace entirely (no element‑wise merge)
+  - null means delete a property when applied
+  - In jd’s structural text format, MERGE appears either as `^ "MERGE"` or legacy `^ {"Merge":true}`.
+
+- JSON Merge Patch (RFC 7386) format: a serialization for merge‑style patches (a single JSON object where keys map to changes, `null` deletes, nested objects recurse, arrays replace).
+
+In jd-sql, keep these separate but interoperable:
+
+- Computing diffs:
+  - `select jd_diff(a, b, options, 'jd')` → jd text as a JSON string
+  - `select jd_diff(a, b, options, 'merge')` or `select jd_diff_merge(a, b, options)` → RFC 7386 object
+  - `select jd_diff(a, b, options, 'patch')` or `select jd_diff_patch(a, b, options)` → RFC 6902 array
+
+- Translating formats:
+  - `select jd_translate_diff_format(diff_jsonb, 'merge', 'jd')` will include the MERGE header in the jd text output (as upstream specifies).
+  - `select jd_translate_diff_format(diff_jsonb, 'jd', 'merge')` produces RFC 7386 when the jd text contains the MERGE header.
+
+Notes:
+
+- Asking for merge output (format `'merge'`) implies merge semantics for the diff result. This mirrors the upstream CLI’s `-f merge` behavior.
+- jd-sql renders RFC 7386 only when the diff elements are merge‑compatible; translation from non‑merge diffs to RFC 7386 is constrained to leaf property updates/deletes.
+
 ## Installation
 
 TODO: add installation instructions for each implementation
