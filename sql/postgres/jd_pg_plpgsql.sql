@@ -1408,6 +1408,10 @@ declare
     i   int   := 1;
     n   int   := coalesce(array_length(diff_elements, 1), 0);
     e   jd_diff_element;
+    path_arr   text[];
+    parent_arr text[];
+    last_key   text;
+    parent_obj jsonb;
 begin
     while i <= n
         loop
@@ -1419,12 +1423,39 @@ begin
                 end if;
             elsif jsonb_typeof(e.path -> (jsonb_array_length(e.path) - 1)) = 'string' then
                 -- Treat presence of an add value as a replacement/addition regardless of remove presence
+                -- Note: jsonb_set does not create missing intermediate parents; build/update parent objects first
+                -- Compute ordered text[] path, its parent, and last key
+                select array_agg(val order by ord)
+                into path_arr
+                from jsonb_array_elements_text(e.path) with ordinality as t(val, ord);
+
+                if path_arr is not null and array_length(path_arr, 1) >= 1 then
+                    if array_length(path_arr, 1) = 1 then
+                        parent_arr := null; -- top-level
+                        last_key := path_arr[1];
+                    else
+                        parent_arr := path_arr[1:array_length(path_arr, 1) - 1];
+                        last_key := path_arr[array_length(path_arr, 1)];
+                    end if;
+                end if;
+
                 if e.add is not null and array_length(e.add, 1) = 1 then
-                    out := jsonb_set(out, (select array_agg(val)
-                                           from jsonb_array_elements_text(e.path) t(val)), e.add[1], true);
+                    if parent_arr is null then
+                        -- set at top-level
+                        out := coalesce(out, '{}'::jsonb) || jsonb_build_object(last_key, e.add[1]);
+                    else
+                        parent_obj := coalesce(out #> parent_arr, '{}'::jsonb);
+                        parent_obj := parent_obj || jsonb_build_object(last_key, e.add[1]);
+                        out := jsonb_set(out, parent_arr, parent_obj, true);
+                    end if;
                 elsif e.remove is not null and array_length(e.remove, 1) = 1 and e.add is null then
-                    out := jsonb_set(out, (select array_agg(val)
-                                           from jsonb_array_elements_text(e.path) t(val)), 'null'::jsonb, true);
+                    if parent_arr is null then
+                        out := coalesce(out, '{}'::jsonb) || jsonb_build_object(last_key, 'null'::jsonb);
+                    else
+                        parent_obj := coalesce(out #> parent_arr, '{}'::jsonb);
+                        parent_obj := parent_obj || jsonb_build_object(last_key, 'null'::jsonb);
+                        out := jsonb_set(out, parent_arr, parent_obj, true);
+                    end if;
                 end if;
             else
                 -- Non-string terminal (arrays/indices) do not directly contribute to merge object; skip
