@@ -1,5 +1,8 @@
 package dev.jdsql;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -29,37 +32,45 @@ public class SpecLoader {
         if (!Files.isDirectory(casesDir)) {
             throw new IOException("Cases directory not found: " + casesDir);
         }
-        List<Path> files;
-        try (Stream<Path> s = Files.list(casesDir)) {
-            files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
-                    .sorted()
-                    .toList();
-        }
-        List<SpecCase> out = new ArrayList<>();
-        for (Path f : files) {
-            List<SpecCase> batch = MAPPER.readValue(f.toFile(), new TypeReference<>() {
-            });
-            out.addAll(batch);
-        }
-        return out;
+        return loadCasesFromDir(casesDir);
     }
 
     public static List<SpecCase> loadProjectCases() throws IOException {
         // Canonical location for jd-sql project-specific cases
         Path casesDir = projectRoot().resolve("test-src/testdata/cases");
         if (!Files.isDirectory(casesDir)) return List.of();
+        return loadCasesFromDir(casesDir);
+    }
 
+    private static List<SpecCase> loadCasesFromDir(Path dir) throws IOException {
         List<Path> files;
-        try (Stream<Path> s = Files.list(casesDir)) {
+        try (Stream<Path> s = Files.list(dir)) {
             files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
                     .sorted()
                     .toList();
         }
         List<SpecCase> out = new ArrayList<>();
+        JsonFactory factory = new JsonFactory();
         for (Path f : files) {
-            List<SpecCase> batch = MAPPER.readValue(f.toFile(), new com.fasterxml.jackson.core.type.TypeReference<>() {
-            });
-            out.addAll(batch);
+            try (JsonParser parser = factory.createParser(f.toFile())) {
+                if (parser.nextToken() != JsonToken.START_ARRAY) {
+                    // Fallback: parse whole file if not an array
+                    List<SpecCase> batch = MAPPER.readValue(f.toFile(), new TypeReference<>() {});
+                    for (SpecCase sc : batch) {
+                        sc._sourceFile = f;
+                        sc._sourceLine = 1;
+                        out.add(sc);
+                    }
+                    continue;
+                }
+                while (parser.nextToken() == JsonToken.START_OBJECT) {
+                    int line = parser.getCurrentLocation().getLineNr();
+                    SpecCase sc = MAPPER.readValue(parser, SpecCase.class);
+                    sc._sourceFile = f;
+                    sc._sourceLine = line;
+                    out.add(sc);
+                }
+            }
         }
         return out;
     }

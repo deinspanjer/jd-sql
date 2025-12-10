@@ -460,7 +460,7 @@ select _jd_json_equal($1, $2, $3)
 $$;
 
 -- Internal recursive helper with explicit path
-create or replace function _jd_diff_struct(a jsonb, b jsonb, cur_path jd_path, options jd_option) returns setof jd_diff_element
+create or replace function _jd_diff_struct(a jsonb, b jsonb, cur_path jd_path, options jd_option, debug bool default false) returns setof jd_diff_element
     language plpgsql
     stable as
 $$
@@ -475,12 +475,25 @@ declare
     wa       int;
     wb       int;
     loc_opts jd_option := _jd_effective_options(options, cur_path);
+    is_merge boolean := null; -- effective MERGE option at current path
 begin
+    if debug then
+        raise debug 'jd_diff_struct(%, %, %, %); eq?=%; eff_opts=%', a, b, cur_path, options, _jd_json_equal(a, b, loc_opts), loc_opts;
+    end if;
+    -- cache effective merge flag for this path
+    is_merge := _jd_option_has(loc_opts, 'MERGE');
     if _jd_json_equal(a, b, loc_opts) then return; end if;
 
     -- Handle void (SQL NULL) on either side as add-only or remove-only at current path
     if a is null or b is null then
-        elem.metadata := row (false)::jd_metadata;
+        if debug then
+            if a is null then
+                raise debug 'null-handling at %: a is null, add b', coalesce(cur_path, '[]'::jsonb);
+            elsif b is null then
+                raise debug 'null-handling at %: b is null, remove a', coalesce(cur_path, '[]'::jsonb);
+            end if;
+        end if;
+        elem.metadata := row (is_merge)::jd_metadata;
         elem.options := coalesce(options, '[]'::jsonb);
         elem.path := coalesce(cur_path, '[]'::jsonb);
         elem.before := null;
@@ -497,7 +510,13 @@ begin
     end if;
 
     if jsonb_typeof(a) = 'object' and jsonb_typeof(b) = 'object' then
+        if debug then
+            raise debug 'object branch at %', coalesce(cur_path, '[]'::jsonb);
+        end if;
         -- removals (emit first)
+        if debug then
+            raise debug 'object removals at %', coalesce(cur_path, '[]'::jsonb);
+        end if;
         for k in select key
                  from (select key
                        from jsonb_object_keys(a) as key
@@ -506,7 +525,10 @@ begin
                        from jsonb_object_keys(b) as key) s
                  order by 1
             loop
-                elem.metadata := row (false)::jd_metadata;
+                if debug then
+                    raise debug ' - remove key %', k;
+                end if;
+                elem.metadata := row (is_merge)::jd_metadata;
                 elem.options := coalesce(options, '[]'::jsonb);
                 elem.path := coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(k));
                 elem.before := null;
@@ -517,6 +539,9 @@ begin
             end loop;
 
         -- replacements or nested diffs (emit second)
+        if debug then
+            raise debug 'object common keys (recurse/replace) at %', coalesce(cur_path, '[]'::jsonb);
+        end if;
         for k in select key
                  from (select key
                        from jsonb_object_keys(a) as key
@@ -528,15 +553,22 @@ begin
                 declare
                     child_path jsonb     := coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(k));
                     child_opts jd_option := _jd_effective_options(options, child_path);
+                    child_is_merge boolean := _jd_option_has(child_opts, 'MERGE');
                 begin
                     if ((jsonb_typeof(a -> k) = 'object' and jsonb_typeof(b -> k) = 'object') or
                         (jsonb_typeof(a -> k) = 'array' and jsonb_typeof(b -> k) = 'array')) then
                         -- Recurse; deeper level will use its own effective options for equality
-                        return query select * from _jd_diff_struct(a -> k, b -> k, child_path, options);
+                        if debug then
+                            raise debug ' - recurse into %', child_path;
+                        end if;
+                        return query select * from _jd_diff_struct(a -> k, b -> k, child_path, options, debug);
                     else
                         -- Scalars or differing types: decide using child-specific options (e.g., precision)
                         if not _jd_json_equal(a -> k, b -> k, child_opts) then
-                            elem.metadata := row (false)::jd_metadata;
+                            if debug then
+                                raise debug ' - replace scalar at % (opts=%)', child_path, child_opts;
+                            end if;
+                            elem.metadata := row (child_is_merge)::jd_metadata;
                             elem.options := coalesce(options, '[]'::jsonb);
                             elem.path := child_path;
                             elem.before := null;
@@ -550,6 +582,9 @@ begin
             end loop;
 
         -- additions (emit last)
+        if debug then
+            raise debug 'object additions at %', coalesce(cur_path, '[]'::jsonb);
+        end if;
         for k in select key
                  from (select key
                        from jsonb_object_keys(b) as key
@@ -558,7 +593,10 @@ begin
                        from jsonb_object_keys(a) as key) s
                  order by 1
             loop
-                elem.metadata := row (false)::jd_metadata;
+                if debug then
+                    raise debug ' - add key %', k;
+                end if;
+                elem.metadata := row (is_merge)::jd_metadata;
                 elem.options := coalesce(options, '[]'::jsonb);
                 elem.path := coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(k));
                 elem.before := null;
@@ -571,9 +609,15 @@ begin
     end if;
 
     if jsonb_typeof(a) = 'array' and jsonb_typeof(b) = 'array' then
+        if debug then
+            raise debug 'array branch at % (opts=%)', coalesce(cur_path, '[]'::jsonb), loc_opts;
+        end if;
         -- If MERGE semantics are enabled at this path, arrays are replaced wholesale
         if _jd_option_has(loc_opts, 'MERGE') then
-            elem.metadata := row (true)::jd_metadata; -- mark merge semantics awareness
+            if debug then
+                raise debug 'array MERGE at %', coalesce(cur_path, '[]'::jsonb);
+            end if;
+            elem.metadata := row (is_merge)::jd_metadata; -- mark merge semantics awareness
             elem.options := coalesce(options, '[]'::jsonb);
             elem.path := coalesce(cur_path, '[]'::jsonb);
             elem.before := null;
@@ -599,6 +643,9 @@ begin
                 bmap     jsonb   := '{}'::jsonb;
                 counts   boolean := is_multi; -- whether to track counts
             begin
+                if debug then
+                    raise debug 'array set-mode at %: mode=%, setkeys=%', coalesce(cur_path, '[]'::jsonb), case when counts then 'MULTISET' else 'SET' end, setkeys;
+                end if;
                 -- build amap
                 i := 0; la := coalesce(jsonb_array_length(a), 0);
                 while i < la
@@ -632,6 +679,9 @@ begin
                         end if;
                         i := i + 1;
                     end loop;
+                if debug then
+                    raise debug 'built maps at %: |A|=%, |B|=%', coalesce(cur_path, '[]'::jsonb), la, lb;
+                end if;
 
                 -- For setkeys and objects present in both, recurse into changed objects
                 if setkeys is not null then
@@ -668,6 +718,9 @@ begin
                                     ipath jsonb := coalesce(cur_path, '[]'::jsonb) ||
                                                    jsonb_build_array(_jd_object_identity(ah, setkeys));
                                 begin
+                                    if debug then
+                                        raise debug 'identity match at % key %, checking scalar fields', ipath, hkey;
+                                    end if;
                                     for kk in select key
                                               from (select key
                                                     from jsonb_object_keys(ah) as key
@@ -685,9 +738,19 @@ begin
                                                jsonb_typeof(bval) <> 'object' and
                                                jsonb_typeof(bval) <> 'array' and
                                                not _jd_json_equal(aval, bval, loc_opts) then
-                                                elem :=
-                                                        row (row (false)::jd_metadata, coalesce(options, '[]'::jsonb), ipath || jsonb_build_array(to_jsonb(kk)), null, array [aval], array [bval], null);
-                                                return next elem; elem := null;
+                                                if debug then
+                                                    raise debug ' - field replace at %/%', ipath, kk;
+                                                end if;
+                                                -- compute effective options for the field path and set merge accordingly
+                                                declare
+                                                    fld_path jsonb := ipath || jsonb_build_array(to_jsonb(kk));
+                                                    fld_opts jd_option := _jd_effective_options(options, fld_path);
+                                                    fld_is_merge boolean := _jd_option_has(fld_opts, 'MERGE');
+                                                begin
+                                                    elem :=
+                                                        row (row (fld_is_merge)::jd_metadata, coalesce(options, '[]'::jsonb), fld_path, null, array [aval], array [bval], null);
+                                                    return next elem; elem := null;
+                                                end;
                                             end if;
                                         end loop;
                                 end;
@@ -719,13 +782,16 @@ begin
                                 cb := case when (bmap ? hkey) then 1 else 0 end; -- presence only for set semantics
                                 need := ca - cb;
                                 if need > 0 then
+                                    if debug then
+                                        raise debug ' - multiplicity trim at % key %: removing % extra', coalesce(cur_path, '[]'::jsonb), hkey, need;
+                                    end if;
                                     -- remove from the end to match expected index positions
                                     i := la - 1;
                                     while i >= 0 and need > 0
                                         loop
                                             if _jd_array_key(a -> i, setkeys) = hkey then
                                                 elem :=
-                                                        row (row (false)::jd_metadata, coalesce(options, '[]'::jsonb), coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(i)), null, array [a -> i], null, null);
+                                                        row (row (is_merge)::jd_metadata, coalesce(options, '[]'::jsonb), coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(i)), null, array [a -> i], null, null);
                                                 return next elem; elem := null;
                                                 need := need - 1;
                                             end if;
@@ -739,7 +805,10 @@ begin
 
                 -- For MULTISET (bag) or pure SET of scalars (no setkeys), emit removals/additions here and return.
                 if counts or setkeys is null then
-                    elem.metadata := row (false)::jd_metadata;
+                    if debug then
+                        raise debug 'set/multiset scalar handling at %', coalesce(cur_path, '[]'::jsonb);
+                    end if;
+                    elem.metadata := row (is_merge)::jd_metadata;
                     elem.options := coalesce(options, '[]'::jsonb);
                     -- path segment differs for SET vs MULTISET
                     if counts then
@@ -843,6 +912,9 @@ begin
 
                     -- emit combined hunk if present
                     if elem.path is not null and (elem.remove is not null or elem.add is not null) then
+                        if debug then
+                            raise debug 'emit set/multiset hunk at % (remove=% add=%)', elem.path, coalesce(array_length(elem.remove,1),0), coalesce(array_length(elem.add,1),0);
+                        end if;
                         return next elem;
                     end if;
                     return;
@@ -883,8 +955,12 @@ begin
             return; -- arrays equal (should have been caught earlier)
         end if;
 
+        if debug then
+            raise debug 'array window at %: p=% s=% wa=% wb=%', coalesce(cur_path, '[]'::jsonb), p, s, wa, wb;
+        end if;
+
         -- Emit a single hunk for the changed window at index p with context before/after
-        elem.metadata := row (false)::jd_metadata;
+        elem.metadata := row (is_merge)::jd_metadata;
         elem.options := coalesce(options, '[]'::jsonb);
         elem.path := coalesce(cur_path, '[]'::jsonb) || jsonb_build_array(to_jsonb(p));
 
@@ -949,7 +1025,10 @@ begin
     end if;
 
     -- Fallback: single hunk at current path
-    elem.metadata := row (false)::jd_metadata;
+    if debug then
+        raise debug 'fallback hunk at %', coalesce(cur_path, '[]'::jsonb);
+    end if;
+    elem.metadata := row (is_merge)::jd_metadata;
     elem.options := coalesce(options, '[]'::jsonb);
     elem.path := coalesce(cur_path, '[]'::jsonb);
     elem.before := null;
@@ -1333,8 +1412,12 @@ begin
     while i <= n
         loop
             e := diff_elements[i];
-            if coalesce(jsonb_array_length(e.path), 0) > 0 and
-               jsonb_typeof(e.path -> (jsonb_array_length(e.path) - 1)) = 'string' then
+            if coalesce(jsonb_array_length(e.path), 0) = 0 then
+                -- root-level replacement under merge semantics
+                if e.add is not null and array_length(e.add, 1) = 1 then
+                    out := e.add[1];
+                end if;
+            elsif jsonb_typeof(e.path -> (jsonb_array_length(e.path) - 1)) = 'string' then
                 -- Treat presence of an add value as a replacement/addition regardless of remove presence
                 if e.add is not null and array_length(e.add, 1) = 1 then
                     out := jsonb_set(out, (select array_agg(val)
@@ -1343,6 +1426,9 @@ begin
                     out := jsonb_set(out, (select array_agg(val)
                                            from jsonb_array_elements_text(e.path) t(val)), 'null'::jsonb, true);
                 end if;
+            else
+                -- Non-string terminal (arrays/indices) do not directly contribute to merge object; skip
+                null;
             end if;
             i := i + 1;
         end loop;
@@ -1351,14 +1437,16 @@ end
 $$;
 
 -- Compute RFC 7386 (JSON Merge Patch)
-create or replace function jd_diff_merge(a jsonb, b jsonb, options jd_option default '[]'::jsonb) returns jd_merge
+create or replace function jd_diff_merge(a jsonb, b jsonb, options jd_option default '["MERGE"]'::jsonb) returns jd_merge
     language plpgsql
     stable as
 $$
 declare
-    elems jd_diff_element[];
+    elems   jd_diff_element[];
+    eff_opt jd_option := (coalesce(options, '[]'::jsonb) || '["MERGE"]'::jsonb);
 begin
-    select array_agg(d) into elems from jd_diff_struct(a, b, options) as d;
+    -- Imply MERGE semantics when rendering merge format regardless of caller options
+    select array_agg(d) into elems from jd_diff_struct(a, b, eff_opt) as d;
     if elems is null or array_length(elems, 1) is null then return '{}'::jsonb; end if;
     return jd_render_diff_merge(elems);
 end

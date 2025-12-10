@@ -168,6 +168,10 @@ public class EngineSpecIT {
         for (SpecCase c : cases) {
             String displayName = sqlFile.getFileName() + " :: " + normalizeCategory(c) + "/" + c.name;
             tests.add(DynamicTest.dynamicTest(displayName, () -> {
+                // Emit clickable source location for the case JSON in IntelliJ Run console
+                if (c._sourceFile != null && c._sourceLine > 0) {
+                    System.out.println(c._sourceFile.toString() + ":" + c._sourceLine + " - " + c.name);
+                }
                 // Skip YAML-mode cases by default: SQL runner does not support YAML I/O
                 if (containsYamlArg(c) && !yamlEnabled()) {
                     org.junit.jupiter.api.Assumptions.assumeTrue(false,
@@ -273,6 +277,10 @@ public class EngineSpecIT {
             for (SpecCase c : inCat) {
                 String displayName = normalizeCategory(c) + "/" + c.name;
                 caseTests.add(DynamicTest.dynamicTest(displayName, () -> {
+                    // Emit clickable source location for the case JSON in IntelliJ Run console
+                    if (c._sourceFile != null && c._sourceLine > 0) {
+                        System.out.println(c._sourceFile.toString() + ":" + c._sourceLine + " - " + c.name);
+                    }
                     // Skip YAML-mode cases by default
                     if (containsYamlArg(c) && !yamlEnabled()) {
                         org.junit.jupiter.api.Assumptions.assumeTrue(false,
